@@ -1,0 +1,158 @@
+---
+title: "in vitro svm"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(DelayedMatrixStats)
+  library(Seurat)
+  library(ggplot2)
+  library(ggthemes)
+  library(scater)
+  library(scReClassify)
+  library(dplyr)
+})
+```
+
+
+```{r}
+sce_GSE144897_1 = readRDS("../EmbryoEikonDev/Data/human_gastruloid_GSE144897_1.RDS")
+
+convert_to_seurat <- function(sce, meta = TRUE, ...) {
+  drops <- rownames(sce)
+  if (meta) 
+    meta.data <- colData(sce)
+  else meta.data <- NULL
+  counts <- counts(sce)[drops, ,drop = FALSE]
+  seur <- Seurat::CreateSeuratObject(counts = counts, meta.data = as.data.frame(meta.data))
+  return(seur)
+}
+
+
+seu_GSE144897_1 <- convert_to_seurat(sce_GSE144897_1, meta = TRUE)
+seu_GSE144897_1 <- NormalizeData(seu_GSE144897_1,
+                                 normalization.method = "LogNormalize",
+                                 scale.factor = 10000)
+seu_GSE144897_1 <- FindVariableFeatures(seu_GSE144897_1, 
+                                        selection.method = "vst", 
+                                        nfeatures = 1000)
+
+seu_GSE144897_1 <- ScaleData(seu_GSE144897_1, verbose = FALSE)
+seu_GSE144897_1 <- RunPCA(seu_GSE144897_1, npcs = 20, ndims.print = 1:15, verbose = FALSE) 
+seu_GSE144897_1 <- RunUMAP(seu_GSE144897_1, 
+                           reduction = "pca", 
+                           dims = 1:15)
+```
+
+
+```{r}
+svm_prob_list = lapply(1:5, function(i) {
+  
+  print(i)
+  set.seed(i)
+  pcs = Embeddings(seu_GSE144897_1, "pca")
+  tmp = pcs
+  rownames(tmp) <- NULL
+  Y <- seu_GSE144897_1$celltype
+  model <- e1071::svm(tmp, factor(Y), probability = TRUE)
+  prob.mat <- attr(stats::predict(model, pcs,
+                                  decision.values = FALSE,
+                                  probability = TRUE),
+                   "probabilities")
+  
+  svm_prob = apply(prob.mat, 1, max)
+  
+  return(svm_prob)
+  
+})
+
+svm_prob_all = do.call(cbind,svm_prob_list)
+svm_prob_mean = apply(svm_prob_all, 1, mean)
+
+dftoplot = as.data.frame(cbind(svm_prob_mean,seu_GSE144897_1$celltype))
+dftoplot$class = dftoplot$svm_prob_mean
+dftoplot$class[dftoplot$svm_prob_mean <= 0.5] = "low"
+dftoplot$class[dftoplot$svm_prob_mean <= 0.75 & dftoplot$svm_prob_mean > 0.5] = "intermediate"
+dftoplot$class[dftoplot$svm_prob_mean <= 0.9 & dftoplot$svm_prob_mean > 0.75] = "high"
+dftoplot$class[dftoplot$svm_prob_mean > 0.9] = "very high"
+
+my_col = RColorBrewer::brewer.pal(12, "Paired")
+my_colors = colorRampPalette(my_col)(length(unique(seu_GSE144897_1$celltype)))
+
+dftoplot$class <- factor(dftoplot$class, levels = c("very high", "high", "intermediate", "low"))
+p1 = dftoplot %>%
+  ggplot(aes(y = seu_GSE144897_1$celltype, fill = factor(class))) +
+  geom_bar(position="fill") +
+  scale_fill_manual(values = my_colors) +
+  theme_linedraw()
+p1
+
+#svm_labels = colnames(prob.mat)[apply(prob.mat, 1, which.max)]
+#sum(GSE144897_1$celltype != svm_labels)
+```
+
+```{r}
+svm_label_list = lapply(1:50, function(i) {
+  
+  print(i)
+  set.seed(i)
+  pcs = Embeddings(seu_GSE144897_1, "pca")
+  tmp = pcs
+  rownames(tmp) <- NULL
+  Y <- seu_GSE144897_1$celltype
+  
+  #idx <- sample(1:length(Y), round(length(Y)*0.8))
+  #tmp = tmp[idx,]; pcs = pcs[idx,]; Y = Y[idx]
+  model <- e1071::svm(tmp, factor(Y), probability = TRUE)
+  prob.mat <- attr(stats::predict(model, pcs,
+                                  decision.values = FALSE,
+                                  probability = TRUE),
+                   "probabilities")
+  
+  svm_labels = colnames(prob.mat)[apply(prob.mat, 1, which.max)]
+  df = data.frame(cellID = rownames(pcs),
+                  labels = svm_labels,
+                  rep = i)
+  return(df)
+  
+})
+svm_label_mat = do.call(rbind,svm_label_list)
+
+svm_label_count = svm_label_mat %>%
+  group_by(cellID) %>%
+  dplyr::summarise(celltype = names(table(labels)),
+                   Freq = table(labels))
+
+chqRes = lapply(unique(svm_label_count$cellID), function(cell) {
+  
+  cty = unique(seu_GSE144897_1$celltype)
+  res = matrix(NA, ncol = length(cty))
+  colnames(res) = cty
+  
+  for (cty_n in cty) {
+    print(cty_n)
+    count = as.numeric(svm_label_count[svm_label_count$cellID == cell & svm_label_count$celltype == cty_n, "Freq"][[1]])
+    if (length(count) == 0) {
+      res[,cty_n] <- 0
+    } else {
+      res[,cty_n] <- count
+    }
+    
+  }
+  offtarget_expect = c(rep(1/ncol(res),ncol(res)))
+  chq.res = chisq.test(x=c(res), p=offtarget_expect)
+  
+  df = data.frame(cellID = cell,
+                  stats = chq.res$statistic,
+                  pvalue = chq.res$p.value)
+  return(df)
+})
+chqRes = do.call(rbind, chqRes)
+```
+

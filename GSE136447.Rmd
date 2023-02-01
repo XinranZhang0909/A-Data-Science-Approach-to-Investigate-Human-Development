@@ -1,0 +1,96 @@
+---
+title: "GSE136447"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+  library(dplyr)
+})
+```
+
+
+```{r}
+count = read.delim("../../Data/GSE136447/GSE136447_555sample_gene_count_matrix.txt", 
+                   sep = "\t", row.names = 1)
+
+fpkm_mat = read.delim("../../Data/GSE136447/GSE136447_555-samples-fpkm.txt", 
+                   sep = "\t", row.names = 1)
+
+cellNames = colnames(count)
+
+gene <- rownames(count)
+ensemblID = sapply(strsplit(gene, "[|]"), "[[", 1)
+geneID = sapply(strsplit(gene, "[|]"), "[[", 2)
+sum(duplicated(gene))
+sum(duplicated(ensemblID))
+sum(duplicated(geneID))
+count = count[!duplicated(geneID),]
+geneID = sapply(strsplit(rownames(count), "[|]"),"[[", 2)
+row.names(count) = geneID
+
+fpkm_mat = fpkm_mat[!duplicated(fpkm_mat$Gene.Name),]
+row.names(fpkm_mat) = fpkm_mat$Gene.Name
+fpkm_mat = fpkm_mat[,-c(1:6)]
+
+cell_keep = intersect(colnames(fpkm_mat), colnames(count))
+new_fpkm = fpkm_mat[, cell_keep]
+new_count = count[, cell_keep]
+
+
+meta = data.frame(
+  embryo = cell_keep,
+  timepoint = rep("pre-gastrulation embryo", ncol(new_count)),
+  celltype = NA,
+  batch_batch = NA,
+  batch_embryo = NA,
+  batch_sex = NA,
+  batch_other = NA,
+  treatment = rep("exvivo", ncol(new_count)),
+  type = rep("embryo", ncol(new_count)),
+  dataset = rep("GSE136447", ncol(new_count))
+)
+rownames(meta) = cell_keep
+
+new_fpkm = new_fpkm[rownames(new_count),]
+
+sce = SingleCellExperiment::SingleCellExperiment(assay = list(counts = new_count, fpkm = new_fpkm),
+                                                 colData = meta)
+
+
+```
+
+```{r}
+totalUMI <- colSums(counts(sce))
+#mitochondrial
+propMito <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce) > 0)
+propZero <- colSums(counts(sce) == 0)/nrow(sce)
+
+sce$nUMI <- totalUMI
+sce$nGene <- totalGene
+sce$propMT <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+sce$propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+
+dim(sce)
+propZeroGene <- rowSums(counts(sce) == 0)/ncol(sce)
+sce = sce[propZeroGene < 1, propZero < 1]
+
+#transforming the data
+sce = scater::logNormCounts(sce)
+sce = scater::runPCA(sce, scale = TRUE)
+sce = scater::runUMAP(sce, ncomponents = 5)
+plotUMAP(sce, colour_by = "timepoint")
+plotUMAP(sce, colour_by = "nGene")
+
+saveRDS(sce, file = "../Data/human_embryo_GSE136447.RDS")
+```

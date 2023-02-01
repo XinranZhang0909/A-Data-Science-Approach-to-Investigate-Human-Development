@@ -1,0 +1,114 @@
+---
+title: "GSE177689"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+  library(dplyr)
+  library(tidyverse)
+})
+```
+
+```{r}
+count = readRDS("../../Data/GSE177689/GSE177689_blastoid.H9.okae_bts5__scRNAseq.unfiltered__counts.RDS")
+
+geneNames = count$gene_id
+tmp = strsplit(geneNames, "-")
+ensemblID = sapply(tmp, "[[", 1)
+geneID = sapply(tmp, "[[", 2)
+sum(duplicated(geneNames))
+sum(duplicated(ensemblID))
+sum(duplicated(geneID))
+count = count[!duplicated(geneID),]
+geneID = sapply(strsplit(count$gene_id, "[-]"),"[[", 2)
+row.names(count) = geneID
+count = count[,-1]
+
+metadata = read.delim("../../Data/GSE177689/GSE177689_blastoid.H9.okae_bts5__scRNAseq.unfiltered__metadata.tsv", sep = "\t", row.names = 1)
+
+sample = metadata$samplename
+names(count) = sample
+count = count %>% select(starts_with("blastoid"))
+metadata = metadata[grepl("blastoid", metadata$samplename),]
+
+cellNames = colnames(count)
+tmp = strsplit(cellNames, "[_]")
+label = sapply(tmp, "[[", 2)
+tmp2 = strsplit(label, "[-]")
+timepoints = sapply(tmp2, "[[", 1)
+
+meta = data.frame(
+  cellname = cellNames,
+  timepoint = timepoints,
+  celltype = NA,
+  treatment = metadata$treatment,
+  batch = NA,
+  type = rep("blastoid", ncol(count)),
+  dataset = rep("GSE177689", ncol(count))
+)
+rownames(meta) = cellNames
+
+sce = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count),
+                                                 colData = meta)
+
+```
+
+# QC for cells
+```{r}
+totalUMI <- colSums(counts(sce))
+#mitochondrial
+propMito <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce) > 0)
+propZero <- colSums(counts(sce) == 0)/nrow(sce)
+
+sce$nUMI <- totalUMI
+sce$nGene <- totalGene
+sce$propMT <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+sce$propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+
+dim(sce)
+propZeroGene <- rowSums(counts(sce) == 0)/ncol(sce)
+sce = sce[propZeroGene < 1, propZero < 1]
+
+#transforming the data
+sce = scater::logNormCounts(sce)
+sce = scater::runPCA(sce, scale = TRUE)
+sce = scater::runUMAP(sce, ncomponents = 5)
+plotUMAP(sce, colour_by = "timepoint")
+plotUMAP(sce, colour_by = "nGene")
+
+saveRDS(sce, file = "../Data/human_blastoid_GSE177689.RDS")
+```
+
+```{r}
+df = cbind(colData(sce), reducedDim(sce, "PCA"))
+df <- as.data.frame(df)
+
+idx = colnames(df)[8:10]
+g <- lapply(idx, function(metric) {
+  df$metric <- as.numeric(df[, metric])
+  p <- df %>% ggplot(aes(x = PC1, y = PC2, col = metric)) +
+    geom_point() 
+  return(p)
+})
+patchwork::wrap_plots(g, ncol = 3)
+```
+
+```{r}
+ggplot(df, aes(x = nGene, y = propMT, col = timepoint)) + 
+  geom_point()
+
+ggplot(df, aes(x = nGene, fill = timepoint, alpha = 0.9)) + 
+  geom_histogram(bins= 100) 
+```
+

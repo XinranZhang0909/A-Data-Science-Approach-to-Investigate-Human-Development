@@ -1,0 +1,131 @@
+---
+title: "GSE158971"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+  library(dplyr)
+})
+```
+
+```{r}
+count = Matrix::readMM("../../Data/GSE158971/GSM4816780_Day6_matrix.mtx")
+
+feature = read.table("../../Data/GSE158971/GSM4816780_Day6_features.tsv", sep = '\t', header = FALSE)
+
+barcodes = read.table("../../Data/GSE158971/GSM4816780_Day6_barcodes.tsv", sep = '\t', header = FALSE)
+
+geneID = feature$V2
+rownames(count)=geneID
+colnames(count)=barcodes$V1
+
+meta = data.frame(
+  cellname = barcodes$V1,
+  timepoint = rep("Day6", ncol(count)),
+  celltype = NA,
+  treatment = NA,
+  batch = NA,
+  type = rep("blastoid", ncol(count)),
+  dataset = rep("GSE158971", ncol(count))
+)
+rownames(meta) = barcodes$V1
+
+sce1 = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count),
+                                                 colData = meta)
+```
+
+```{r}
+count2 = Matrix::readMM("../../Data/GSE158971/GSM4816781_Day8_matrix.mtx")
+
+feature2 = read.table("../../Data/GSE158971/GSM4816781_Day8_features.tsv", sep = '\t', header = FALSE)
+
+barcodes2 = read.table("../../Data/GSE158971/GSM4816781_Day8_barcodes.tsv", sep = '\t', header = FALSE)
+
+geneID2 = feature2$V2
+rownames(count2)=geneID2
+colnames(count2)=barcodes2$V1
+
+meta2 = data.frame(
+  cellname = barcodes2$V1,
+  timepoint = rep("Day8", ncol(count2)),
+  celltype = NA,
+  treatment = NA,
+  batch = NA,
+  type = rep("blastoid", ncol(count2)),
+  dataset = rep("GSE158971", ncol(count2))
+)
+rownames(meta2) = barcodes2$V1
+
+sce2 = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count2),
+                                                 colData = meta2)
+```
+
+```{r}
+count3 = Matrix::readMM("../../Data/GSE158971/GSM4816782_Day10_matrix.mtx")
+
+feature3 = read.table("../../Data/GSE158971/GSM4816782_Day10_features.tsv", sep = '\t', header = FALSE)
+
+barcodes3 = read.table("../../Data/GSE158971/GSM4816782_Day10_barcodes.tsv", sep = '\t', header = FALSE)
+
+geneID3 = feature3$V2
+rownames(count3)=geneID3
+colnames(count3)=barcodes3$V1
+
+meta3 = data.frame(
+  cellname = barcodes3$V1,
+  timepoint = rep("Day10", ncol(count3)),
+  celltype = NA,
+  treatment = NA,
+  batch = NA,
+  type = rep("blastoid", ncol(count3)),
+  dataset = rep("GSE158971", ncol(count3))
+)
+rownames(meta3) = barcodes3$V1
+
+sce3 = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count3),
+                                                 colData = meta3)
+```
+
+```{r}
+colnames(sce1) = paste0(colnames(sce1), "_", 1:ncol(sce1))
+colnames(sce2) = paste0(colnames(sce2), "_", 1:ncol(sce2))
+colnames(sce3) = paste0(colnames(sce3), "_", 1:ncol(sce3))
+sce=cbind(sce1,sce2,sce3)
+```
+
+
+```{r}
+totalUMI <- colSums(counts(sce))
+#mitochondrial
+propMito <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce) > 0)
+propZero <- colSums(counts(sce) == 0)/nrow(sce)
+
+sce$nUMI <- totalUMI
+sce$nGene <- totalGene
+sce$propMT <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+sce$propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+
+dim(sce)
+propZeroGene <- rowSums(counts(sce) == 0)/ncol(sce)
+sce = sce[propZeroGene < 1, propZero < 1]
+
+#transforming the data
+sce = scater::logNormCounts(sce)
+sce = scater::runPCA(sce, scale = TRUE)
+sce = scater::runUMAP(sce, ncomponents = 5)
+plotUMAP(sce, colour_by = "nGene")
+
+saveRDS(sce, file = "../Data/human_blastoid_GSE158971.RDS")
+```
+

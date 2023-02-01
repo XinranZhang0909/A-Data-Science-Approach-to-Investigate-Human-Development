@@ -1,0 +1,121 @@
+---
+title: "Integration of in vivo data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(DelayedMatrixStats)
+  library(Seurat)
+  library(ggplot2)
+  library(ggthemes)
+  library(scater)
+  library(scReClassify)
+  library(RColorBrewer)
+  library(dplyr)
+})
+```
+
+# Load the four in vivo datasets
+```{r}
+sce_EMTAB3929 = readRDS("../EmbryoEikonDev/Data/Human_embryo_E-MTAB-3929.RDS") # Petropoulos et al. 
+sce_EMTAB3929_label = sce_EMTAB3929[, sce_EMTAB3929$celltype != "not applicable-NA"]
+sce_EMTAB3929_nolabel = sce_EMTAB3929[, sce_EMTAB3929$celltype == "not applicable-NA"]
+sce_EMTAB3929_nolabel$celltype = NA
+sce_EMTAB3929 = readRDS("../EmbryoEikonDev/Data/Human_embryo_E-MTAB-3929.RDS") # Petropoulos et al. 
+sce_2 = readRDS("../EmbryoEikonDev/Data/human_embryo_2.RDS") # Meistermann et al.
+sce_3 = readRDS("../EmbryoEikonDev/Data/human_embryo_3.RDS") # Mole et al.
+sce_3$batch_batch[sce_3$batch_embryo %in% paste0("embryo",c(12:15))] = "batch1"
+sce_3$batch_batch[!sce_3$batch_embryo %in% paste0("embryo",c(12:15))] = "batch2"
+sce_GSE109555_TrioSeq = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE109555_TrioSeq.RDS") # Zhou et al.
+sce_GSE109555_TrioSeq$dataset = paste0(sce_GSE109555_TrioSeq$dataset, "-trioseq")
+sce_GSE109555_AllEmbryo = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE109555_AllEmbryo.RDS") 
+sce_GSE109555_AllEmbryo$dataset = paste0(sce_GSE109555_AllEmbryo$dataset, "-allembyro")
+sce_GSE136447 = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE136447.RDS") # Xiang et al. 
+
+## filter post-implantation gastrulating embryos
+#sce_EMTAB9388 = readRDS("../EmbryoEikonDev/Data/human_embryo_E-MTAB-9388.RDS") #remove late E16
+## filter because there are only 30 cells
+#sce_GSE66507 = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE66507.RDS") # Blakeley et al. 
+
+## read in doublet results
+doublets <- read.csv("../EmbryoEikonDev/Data/invivo_doublets.csv")
+rownames(doublets) <- doublets$cell
+
+## read in integrated data
+seu_invivo = readRDS("../EmbryoEikonDev/Data/230120_seu_invivo_withTE.RDS")
+```
+
+```{r}
+celltypes_label = seu_invivo$major_celltype_final_scReClassify
+names(celltypes_label) =  paste0(seu_invivo$dataset, "_", seu_invivo$cellID)
+
+timepoint_label = seu_invivo$timepoint2
+names(timepoint_label) =  paste0(seu_invivo$dataset, "_", seu_invivo$cellID)
+
+## process data
+sce_list_invivo = list(sce_EMTAB3929_label,
+                       sce_EMTAB3929_nolabel,
+                       sce_2,
+                       sce_3,
+                       sce_GSE136447,
+                       sce_GSE109555_TrioSeq,
+                       sce_GSE109555_AllEmbryo)
+names(sce_list_invivo) = c("Petropoulos1", "Petropoulos2", "Meistermann", "Mole", "Xiang", "Zhou1", "Zhou2")
+
+geneIdx = Reduce(intersect, lapply(sce_list_invivo, rownames))
+length(geneIdx)
+
+sce_list_invivo <- lapply(sce_list_invivo, function(sce) {
+  
+  if(any(toupper(names(assays(sce))) == "RPKM")) {
+    names(assays(sce_list_invivo[[1]])) <- toupper(names(assays(sce)))
+    counts(sce) <- assay(sce, "RPKM")
+    assay(sce, "RPKM") <- NULL
+    sce <- scater::logNormCounts(sce)
+  } 
+  
+  sce$cellID <- colnames(sce)
+  
+  ### filter for doublets
+  tmpID = paste0(sce$dataset, "_", sce$cellID)
+  print(table(tmpID %in% doublets$cell))
+  print(dim(sce))
+  sce$doublet = doublets[tmpID, "doublet"]
+  print(sum(is.na(sce$doublet)))
+  sce <- sce[,sce$doublet == "Singlet"]
+  sce$major_celltype_final_scReClassify <- celltypes_label[paste0(sce$dataset, "_", sce$cellID)]
+  sce$timepoint2 <- timepoint_label[paste0(sce$dataset, "_", sce$cellID)]
+  print(dim(sce))
+  return(sce[geneIdx,])
+  
+})
+sapply(sce_list_invivo, function(x) table(x$major_celltype_final_scReClassify))
+sapply(sce_list_invivo, function(x) table(x$timepoint2))
+
+sce_list_invivo <- lapply(sce_list_invivo, function(x) {
+  x <- scater::runPCA(x)
+  x <- scater::runUMAP(x)
+  return(x)
+})
+```
+
+# Visualisation of UMAPs
+```{r}
+pList1 = lapply(sce_list_invivo, function(x) plotUMAP(x, colour_by = "major_celltype_final_scReClassify") +  theme(aspect.ratio = 1) + ggtitle(unique(x$dataset)))
+pList2 = lapply(sce_list_invivo, function(x) plotUMAP(x, colour_by = "timepoint2") + NoLegend() + theme(aspect.ratio = 1))
+
+# batch_batch effect present in "3"
+pList3 = lapply(sce_list_invivo, function(x) plotUMAP(x, colour_by = "batch_batch") + theme(aspect.ratio = 1) + ggtitle(unique(x$dataset)))
+patchwork::wrap_plots(pList3, ncol = 4)
+```
+
+# Visualisation of predicted doublets
+
+
+# Visualisation of proportional cell type barplots by dataset and embryonic timepoint

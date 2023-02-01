@@ -1,0 +1,184 @@
+
+```{r, message = FALSE}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(DelayedMatrixStats)
+  library(Seurat)
+  library(ggplot2)
+  library(ggthemes)
+  library(scater)
+  library(scReClassify)
+  library(RColorBrewer)
+  library(dplyr)
+  library(DoubletFinder)
+})
+```
+
+# Load the four in vivo datasets
+```{r}
+## datasets with annotation
+sce_EMTAB3929 = readRDS("../EmbryoEikonDev/Data/Human_embryo_E-MTAB-3929.RDS") # Petropoulos et al. 
+sce_EMTAB3929_label = sce_EMTAB3929[, sce_EMTAB3929$celltype != "not applicable-NA"]
+sce_EMTAB3929_nolabel = sce_EMTAB3929[, sce_EMTAB3929$celltype == "not applicable-NA"]
+sce_EMTAB3929_nolabel$celltype = NA
+sce_EMTAB3929 = readRDS("../EmbryoEikonDev/Data/Human_embryo_E-MTAB-3929.RDS") # Petropoulos et al. 
+sce_2 = readRDS("../EmbryoEikonDev/Data/human_embryo_2.RDS") # Meistermann et al.
+sce_3 = readRDS("../EmbryoEikonDev/Data/human_embryo_3.RDS") # Mole et al.
+sce_3$dataset[sce_3$batch_embryo %in% paste0("embryo",c(12:15))] = "3a"
+sce_3$dataset[!sce_3$batch_embryo %in% paste0("embryo",c(12:15))] = "3b"
+sce_3a = sce_3[,sce_3$dataset == "3a"]
+sce_3b = sce_3[,sce_3$dataset == "3b"]
+sce_GSE109555_TrioSeq = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE109555_TrioSeq.RDS") # Zhou et al.
+sce_GSE109555_TrioSeq$dataset = paste0(sce_GSE109555_TrioSeq$dataset, "-trioseq")
+sce_GSE109555_AllEmbryo = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE109555_AllEmbryo.RDS") 
+sce_GSE109555_AllEmbryo$dataset = paste0(sce_GSE109555_AllEmbryo$dataset, "-allembyro")
+
+## datasets without annotations
+sce_GSE136447 = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE136447.RDS") # Xiang et al. 
+
+## filter post-implantation gastrulating embryos
+#sce_EMTAB9388 = readRDS("../EmbryoEikonDev/Data/human_embryo_E-MTAB-9388.RDS") #remove late E16
+## filter because there are only 30 cells
+#sce_GSE66507 = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE66507.RDS") # Blakeley et al. 
+
+sce_list_invivo = list(sce_EMTAB3929_label,
+                       sce_EMTAB3929_nolabel,
+                       sce_2,
+                       sce_3a,
+                       sce_3b,
+                       sce_GSE136447,
+                       sce_GSE109555_TrioSeq,
+                       sce_GSE109555_AllEmbryo)
+names(sce_list_invivo) = c("Petropoulos1", "Petropoulos2", "Meistermann", "MoleA", "MoleB", "Xiang", "Zhou1", "Zhou2")
+
+sce_list_invivo <- lapply(sce_list_invivo, function(sce) {
+  
+  if(any(toupper(names(assays(sce))) == "RPKM")) {
+    names(assays(sce_list_invivo[[1]])) <- toupper(names(assays(sce)))
+    counts(sce) <- assay(sce, "RPKM")
+    assay(sce, "RPKM") <- NULL
+    sce <- scater::logNormCounts(sce)
+  } 
+  return(sce)
+  
+})
+sapply(sce_list_invivo, function(x) table(x$celltype))
+sapply(sce_list_invivo, function(x) table(x$timepoint))
+```
+
+```{r}
+geneIdx = Reduce(intersect, lapply(sce_list_invivo, rownames))
+length(geneIdx)
+
+counter <- 0
+sce_list_invivo <- lapply(X = sce_list_invivo, FUN = function(x) {
+  counter <<- counter + 1
+  print(counter)
+  x$cellID <- colnames(x)
+  if (!any(is.na(x$celltype))) {
+    x <- x[, x$celltype %in% names(table(x$celltype))[table(x$celltype) > 15]]
+  }
+  x <- x[geneIdx, ]
+  return(x)
+})
+
+sce_combined = scMerge::sce_cbind(sce_list_invivo, exprs = "logcounts", colData_names = c("dataset"))
+
+stats = scran::modelGeneVar(sce_combined)
+hvg = scran::getTopHVGs(stats)
+sce_combined = scater::runPCA(sce_combined, subset_row = hvg, ncomponents = 30)
+sce_combined = scater::runUMAP(sce_combined)
+
+df = data.frame(x = reducedDim(sce_combined, "UMAP")[,1],
+           y = reducedDim(sce_combined, "UMAP")[,2],
+           dataset = sce_combined$dataset)
+df = df[sample(1:nrow(df), nrow(df)),]
+
+ggplot(df, aes(x, y, col = dataset)) + 
+  geom_point(alpha = 0.2) + facet_wrap(~dataset, ncol = 7)
+ggplot(df, aes(x, y, col = dataset)) + 
+  geom_point(alpha = 0.2) 
+```
+
+```{r}
+convert_to_seurat <- function(sce, meta = TRUE, rpkm = FALSE, ...) {
+  drops <- rownames(sce)
+  if (meta) 
+    meta.data <- colData(sce)
+  else meta.data <- NULL
+  
+  if(any(toupper(names(assays(sce))) == "RPKM")) {
+    names(assays(sce_list_invivo[[1]])) <- toupper(names(assays(sce)))
+    counts <- assay(sce, "RPKM")[drops, ,drop = FALSE]
+  } else {
+    counts <- counts(sce)[drops, ,drop = FALSE]
+  }
+  seur <- Seurat::CreateSeuratObject(counts = counts, meta.data = as.data.frame(meta.data)) 
+  return(seur)
+}
+
+processData <- function(sce, 
+                        normalization.method = "LogNormalize",
+                        scale.fator = 10000,
+                        meta = TRUE) {
+  seu <- convert_to_seurat(sce, meta = meta)
+  seu <- NormalizeData(seu,normalization.method = normalization.method, scale.factor = scale.fator)
+  seu <- Seurat::FindVariableFeatures(seu)
+  return(seu)
+}
+
+seu_list_invivo <- lapply(sce_list_invivo, processData)
+geneIdx = Reduce(intersect, lapply(seu_list_invivo, rownames))
+length(geneIdx)
+
+counter <- 0
+seu_list_invivo <- lapply(X = seu_list_invivo , FUN = function(x) {
+  counter <<- counter + 1
+  print(counter)
+  x$cellID <- colnames(x)
+  if (!any(is.na(x$celltype))) {
+    x <- x[, x$celltype %in% names(table(x$celltype))[table(x$celltype) > 15]]
+  }
+  x <- x[geneIdx, ]
+  x <- ScaleData(x, verbose = FALSE)
+  x <- RunPCA(x, verbose = FALSE, npcs = 50)
+  return(x)
+})
+
+idx_query = sapply(seu_list_invivo, function(x) sum(is.na(x$celltype)) != 0)
+sapply(seu_list_invivo, dim)
+sapply(seu_list_invivo, function(x) unique(x$dataset))
+```
+
+```{r fig.height=15, fig.width=15}
+doubletPred = lapply(names(seu_list_invivo), function(x) {
+  
+  print(x)
+  seu = seu_list_invivo[[x]]
+  seu <- RunUMAP(seu, dims = 1:30)
+  
+  sweep.res.list <- DoubletFinder::paramSweep_v3(seu, PCs = 1:30, sct = FALSE)
+  sweep.stats <- DoubletFinder::summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn <- DoubletFinder::find.pK(sweep.stats)
+  
+  nExp_poi <- round(0.05*nrow(seu@meta.data))
+  seu <- DoubletFinder::doubletFinder_v3(seu, PCs = 1:30, 
+                                         pN = 0.25, pK = 0.09, 
+                                         nExp = nExp_poi, 
+                                         reuse.pANN = FALSE, sct = FALSE)
+  
+  res = seu@meta.data[, grepl("DF", colnames(seu@meta.data))]
+  names(res) =  paste0(seu$dataset, "_", seu$cellID)
+  return(res)
+  
+})
+doubletPred_values = unlist(doubletPred)
+
+doublets = data.frame(
+  cell = names(doubletPred_values),
+  doublet = doubletPred_values
+)
+write.csv(doublets, file = "invivo_doublets.csv")
+```
+
+

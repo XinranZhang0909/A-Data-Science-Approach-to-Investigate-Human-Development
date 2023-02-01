@@ -1,0 +1,1150 @@
+
+```{r}
+suppressPackageStartupMessages({
+  library(Cepo)
+  library(Seurat)
+  library(SingleCellExperiment)
+})
+
+seu_invivo = readRDS("../EmbryoEikonDev/Data/230120_seu_invivo_withTE.RDS")
+seu_invivo$treatment[is.na(seu_invivo$treatment)] = "NO"
+seu_invivo$treatment = toupper(seu_invivo$treatment)
+```
+
+```{r}
+reference = seu_invivo
+DefaultAssay(reference) <- "RNA"
+sce_reference = Seurat::as.SingleCellExperiment(reference)
+sce_reference$timepoint2[sce_reference$timepoint2 == 6 & sce_reference$major_celltype_final_scReClassify == "Primitive Endoderm" & sce_reference$dataset %in% c("GSE109555-trioseq")] = 5
+sce_reference$timepoint2[sce_reference$timepoint2 == 6 & sce_reference$major_celltype_final_scReClassify == "Primitive Endoderm" & sce_reference$dataset %in% c("GSE109555-allembyro")] = 9
+sce_reference$final_labels = paste0(sce_reference$major_celltype_final_scReClassify, "_E", 
+                                    sce_reference$timepoint2)
+
+batches = paste0(sce_reference$dataset)
+
+sceList = lapply(unique(batches), function(x) {
+  sce_reference[, batches == x]
+})
+names(sceList) = unique(batches)
+
+sapply(sceList, function(x) table(x$final_labels))
+
+cepoRes = lapply(sceList, function(x) {
+  
+  ctyLabels = paste0(x$major_celltype_final_scReClassify, "_E", x$timepoint2)
+  keep_cty = names(table(ctyLabels))[table(ctyLabels) > 5]
+  print(length(keep_cty))
+  if (length(keep_cty) >= 5) {
+    res = Cepo::Cepo(logcounts(x)[, ctyLabels %in% keep_cty],
+                     ctyLabels[ctyLabels %in% keep_cty],
+                     exprsPct = 0.05, minCells = 5)
+    return(res)
+  }
+  
+})
+names(cepoRes) = names(sceList)
+cepoRes = cepoRes[!sapply(cepoRes, is.null)]
+```
+
+```{r}
+geneIndex = Reduce(intersect, lapply(cepoRes, function(x) {
+  unique(unlist(Cepo::topGenes(x, n = 500)))
+}))
+length(geneIndex)
+
+counter <- 0
+cepoMat = do.call(cbind, lapply(cepoRes, function(x) {
+  counter <<- counter + 1
+  mat = x$stats[geneIndex,]
+  return(mat)
+}))
+
+cepoMat_sample = cepoMat
+cor.mat = cor(as.matrix(cepoMat))
+
+tmp = sapply(strsplit(colnames(cor.mat), "[.]"), "[[", 1)
+dataset=tmp
+pattern = paste0(paste(unique(tmp), collapse = ".|"), ".")
+cty_time = gsub(pattern, "", colnames(cor.mat))
+
+annot = data.frame(
+  dataset = dataset,
+  celltype = sapply(strsplit(cty_time, "_"), "[[", 1),
+  time = sapply(strsplit(cty_time, "_"), "[[", 2)
+)
+rownames(annot) = colnames(cor.mat)
+
+dataset_col = RColorBrewer::brewer.pal(length(unique(annot$dataset)), name = "Accent")
+names(dataset_col) = unique(annot$dataset)
+celltype_col = RColorBrewer::brewer.pal(length(unique(annot$celltype)), name = "Paired")
+names(celltype_col) = unique(annot$celltype)
+time_col = RColorBrewer::brewer.pal(length(unique(annot$time)), name = "Spectral")
+names(time_col) = paste0("E", c(3:12))
+
+annotColors = list(
+  dataset = dataset_col,
+  celltype = celltype_col,
+  time = time_col
+)
+
+#"ward.D", "ward.D2", "single", "complete", "average" (= UPGMA), "mcquitty" (= WPGMA), "median" (= WPGMC) or "centroid" (= UPGMC).
+pheatmap::pheatmap(cor.mat,
+                   annotation_col = annot,
+                   annotation_colors = annotColors,
+                   clustering_method = "ward.D",
+                   border_color = NA,
+                   show_rownames = FALSE,
+                   show_colnames = FALSE)
+```
+
+```{r}
+topFeatures = rownames(seu_invivo)
+all_cty = unique(unlist(lapply(cepoRes, function(x) {
+  colnames(x$stats)
+})))
+
+table(unlist(lapply(cepoRes, function(x) {
+  colnames(x$stats)
+})))
+
+topMarkers = lapply(all_cty, function(cty) {
+  res_all = lapply(cepoRes, function(x) {
+    if (any(colnames(x$stats) %in% cty)) {
+      res = Cepo::topGenes(x, n = 20)[[cty]]
+      res = res[res %in% topFeatures]
+      return(res)
+    }
+  })
+  if (cty %in% c("")) {
+    markers = names(table(unlist(res_all)))[table(unlist(res_all)) > (sum(!sapply(res_all, is.null))-3)]
+  } else if (cty %in% c("")) {
+    markers = names(table(unlist(res_all)))[table(unlist(res_all)) > (sum(!sapply(res_all, is.null))-4)]
+  } else {
+    markers = names(table(unlist(res_all)))[table(unlist(res_all)) == (sum(!sapply(res_all, is.null)))] 
+  }
+  return(markers)
+})
+names(topMarkers) <- all_cty
+
+dupMarkers = unlist(topMarkers)[duplicated(unlist(topMarkers))]
+topMarkers = lapply(topMarkers, function(x) x[!x %in% dupMarkers])
+min(sapply(topMarkers, length))
+
+str(topMarkers)
+
+topMarkersGenes = unlist(topMarkers, use.names = F)
+names(topMarkersGenes) = rep(names(topMarkers), sapply(topMarkers, length))
+```
+
+```{r}
+counter <- 0
+tmp =lapply(cepoRes, function(x) {
+  counter <<- counter + 1
+  genes = intersect(unique(unlist(topMarkers)), rownames(x$stats))
+  mat = x$stats[genes,]
+  return(mat)
+})
+geneIdx = Reduce(intersect, lapply(tmp, rownames))
+topMarkersGenes = topMarkersGenes[topMarkersGenes %in% geneIdx]
+cepoMat = do.call(cbind, lapply(tmp, function(x) x[geneIdx, ]))
+
+tmp = sapply(strsplit(colnames(cor.mat), "[.]"), "[[", 1)
+dataset = tmp
+#dataset = sapply(strsplit(tmp, "__"), "[[", 1)
+#batch = sapply(strsplit(tmp, "__"), "[[", 2)
+pattern = paste0(paste(unique(tmp), collapse = ".|"), ".")
+cty_time = gsub(pattern, "", colnames(cor.mat))
+
+cor.mat = scale(cepoMat)
+
+annot = data.frame(
+  dataset = dataset,
+  #batch = batch,
+  celltype = as.character(sapply(strsplit(cty_time, "_"), "[[", 1)),
+  time = as.numeric(gsub("E", "", sapply(strsplit(cty_time, "_"), "[[", 2)))
+)
+annot$celltype = factor(annot$celltype, levels = c("Pre.morula", "Morula", "Early.blastocyst", "Inner.cell.mass", "Epiblast", "Primitive.Endoderm", "Trophectoderm"))
+rownames(annot) = colnames(cor.mat)
+tmp = order(annot$celltype, annot$time)
+
+dataset_col = RColorBrewer::brewer.pal(length(unique(annot$dataset)), name = "Accent")
+names(dataset_col) = unique(annot$dataset)
+batch_col = RColorBrewer::brewer.pal(length(unique(annot$batch)), name = "Accent")
+names(batch_col) = unique(annot$batch)
+celltype_col = RColorBrewer::brewer.pal(length(unique(annot$celltype)), name = "Paired")
+names(celltype_col) = unique(annot$celltype)
+time_col = RColorBrewer::brewer.pal(length(unique(annot$time)), name = "Spectral")
+names(time_col) = paste0(c(3:12))
+
+annot_row = data.frame(
+  celltype = sapply(strsplit(names(topMarkersGenes), "_"), "[[", 1),
+  time = gsub("E", "", sapply(strsplit(names(topMarkersGenes), "_"), "[[", 2))
+)
+rownames(annot_row) = rownames(cor.mat)
+
+annotColors = list(
+  dataset = dataset_col,
+  celltype = celltype_col,
+  time = time_col
+)
+
+tmp.mat = cor.mat[topMarkersGenes,tmp]
+tmp.mat = tmp.mat[order(names(topMarkersGenes)),]
+
+pheatmap::pheatmap(tmp.mat,
+                   annotation_col = annot,
+                   annotation_row = annot_row,
+                   annotation_colors = annotColors,
+                   color = colorRampPalette(RColorBrewer::brewer.pal(5, "YlOrRd"))(150),
+                   clustering_method = "ward.D2",
+                   cluster_cols = FALSE,
+                   #cluster_rows = FALSE,
+                   border_color = NA,
+                   show_rownames = FALSE,
+                   show_colnames = FALSE)
+```
+
+```{r}
+manyMarkers = lapply(all_cty, function(cty) {
+  res_all = lapply(cepoRes, function(x) {
+    if (any(colnames(x$stats) %in% cty)) {
+      res = Cepo::topGenes(x, n = 50)[[cty]]
+      res = res[res %in% topFeatures]
+      return(res)
+    }
+  })
+  markers = names(table(unlist(res_all)))[table(unlist(res_all)) == sum(!sapply(res_all, is.null))]
+  return(markers)
+})
+names(manyMarkers) <- all_cty
+manyMarkers
+#https://www.nature.com/articles/s41467-020-17575-w 
+sapply(manyMarkers, function(x) any(x %in% c("NR2F2"))) # marker of trophectoderm
+sapply(manyMarkers, function(x) any(x %in% c("CDX2"))) # marker of trophectoderm
+sapply(manyMarkers, function(x) any(x %in% c("IFI16"))) # marker of epiblast
+sapply(manyMarkers, function(x) any(x %in% c("GATA4"))) # marker of primitive endoderm
+sapply(manyMarkers, function(x) any(x %in% c("NANOG"))) # marker of epiblast
+sapply(manyMarkers, function(x) any(x %in% c("KLF17", "SUSD2", "PRDM14"))) # marker of blastocyst-epiblast
+sapply(manyMarkers, function(x) any(x %in% c("GATA6", "MSX2", "HNF4A"))) # marker of early blastocyst
+sapply(manyMarkers, function(x) any(x %in% c("HNF1B", "FOXA2", "GATA4", "RSPO3"))) # marker of hyhoblast
+sapply(manyMarkers, function(x) any(x %in% c("NODAL"))) # marker of hyhoblast
+sapply(manyMarkers, function(x) any(x %in% c("NANOG"))) # marker of hyhoblast
+```
+
+```{r}
+cty_cols = RColorBrewer::brewer.pal(12, "Paired")
+cty_cols = colorRampPalette(cty_cols)(length(unique(seu_invivo$major_celltype_final_scReClassify)))
+names(cty_cols) = unique(seu_invivo$major_celltype_final_scReClassify)
+
+time_cols = RColorBrewer::brewer.pal(8, "Spectral")
+time_cols = colorRampPalette(time_cols)(length(unique(seu_invivo$timepoint2)))
+names(time_cols) = as.character(c(3:12))
+
+p1 = DimPlot(seu_invivo, reduction = "umap", group.by = "major_celltype_final_scReClassify", label = TRUE, cols = cty_cols, label.size = 6, repel = TRUE) + ggtitle("Celltype")
+p2 = DimPlot(seu_invivo, reduction = "umap", group.by = "dataset", label = FALSE,
+             label.size = 6, repel = TRUE) + ggtitle("Dataset")
+p3 = DimPlot(seu_invivo, reduction = "umap", group.by = "timepoint2", label = TRUE,
+             cols = time_cols, 
+             label.size = 6, repel = TRUE) + ggtitle("Timepoint")+ NoLegend()
+p1 + p3
+```
+
+```{r}
+source("/Users/hani/Dropbox (Sydney Uni)/Hani/Supervision/Xinran/EmbryoEikonDev/R/doHopach.R")
+
+geneIndex = Reduce(intersect, lapply(cepoRes, function(x) {
+  unique(unlist(Cepo::topGenes(x, n = 10000)))
+}))
+length(geneIndex)
+
+counter <- 0
+cepoMat = do.call(cbind, lapply(cepoRes, function(x) {
+  counter <<- counter + 1
+  mat = x$stats[geneIndex,]
+  return(mat)
+}))
+
+
+group = colnames(cepoMat)
+group = gsub(paste0(paste(unique(sapply(strsplit(colnames(cepoMat), "[.]"), "[[", 1)), collapse = ".|"), "."), "", group)
+
+cepoMatAve = do.call(cbind, lapply(unique(group), function(x) {
+  
+  tmp = cepoMat[, group == x]
+  if (is.null(dim(tmp))) {
+    return(tmp)
+  } else {
+    return(rowMeans(as.matrix(tmp)))
+  }
+  
+}))
+colnames(cepoMatAve) = unique(group)
+
+runHOPACH(data = cepoMatAve, kmax = 3,
+          labels = FALSE)
+```
+
+```{r}
+geneIndex = Reduce(intersect, lapply(cepoRes, function(x) {
+  unique(unlist(Cepo::topGenes(x, n = 1000)))
+}))
+length(geneIndex)
+
+counter <- 0
+cepoMat = do.call(cbind, lapply(cepoRes, function(x) {
+  counter <<- counter + 1
+  mat = x$stats[geneIndex,]
+  return(mat)
+}))
+
+
+group = colnames(cepoMat)
+group = gsub(paste0(paste(unique(sapply(strsplit(colnames(cepoMat), "[.]"), "[[", 1)), collapse = ".|"), "."), "", group)
+
+cepoMatAve = do.call(cbind, lapply(unique(group), function(x) {
+  
+  tmp = cepoMat[, group == x]
+  if (is.null(dim(tmp))) {
+    return(tmp)
+  } else {
+    return(rowMeans(as.matrix(tmp)))
+  }
+  
+}))
+colnames(cepoMatAve) = unique(group)
+
+par(mfrow = c(4,3))
+
+plot(cepoMatAve[, "Epiblast_E5"], cepoMatAve[, "Trophectoderm_E5"], ylab = "Trophectoderm", xlab = "Epiblast", main = "E5")
+plot(cepoMatAve[, "Trophectoderm_E5"], cepoMatAve[, "Primitive.Endoderm_E5"], ylab = "Trophectoderm", xlab = "PE", main = "E5")
+plot(cepoMatAve[, "Epiblast_E5"], cepoMatAve[, "Primitive.Endoderm_E5"], ylab = "Epiblast", xlab = "PE", main = "E5")
+
+plot(cepoMatAve[, "Epiblast_E6"], cepoMatAve[, "Trophectoderm_E6"], ylab = "Trophectoderm", xlab = "Epiblast", main = "E6")
+plot(cepoMatAve[, "Trophectoderm_E6"], cepoMatAve[, "Primitive.Endoderm_E6"], ylab = "Trophectoderm", xlab = "PE", main = "E6")
+plot(cepoMatAve[, "Epiblast_E6"], cepoMatAve[, "Primitive.Endoderm_E6"], ylab = "Epiblast", xlab = "PE", main = "E6")
+
+plot(cepoMatAve[, "Epiblast_E9"], cepoMatAve[, "Trophectoderm_E9"], ylab = "Trophectoderm", xlab = "Epiblast", main = "E9")
+plot(cepoMatAve[, "Trophectoderm_E9"], cepoMatAve[, "Primitive.Endoderm_E9"], ylab = "Trophectoderm", xlab = "PE", main = "E9")
+plot(cepoMatAve[, "Epiblast_E9"], cepoMatAve[, "Primitive.Endoderm_E9"], ylab = "Epiblast", xlab = "PE", main = "E9")
+
+plot(cepoMatAve[, "Epiblast_E11"], cepoMatAve[, "Trophectoderm_E11"], ylab = "Trophectoderm", xlab = "Epiblast", main = "E11")
+plot(cepoMatAve[, "Trophectoderm_E11"], cepoMatAve[, "Primitive.Endoderm_E11"], ylab = "Trophectoderm", xlab = "PE",main = "E11")
+plot(cepoMatAve[, "Epiblast_E11"], cepoMatAve[, "Primitive.Endoderm_E11"],ylab = "Epiblast", xlab = "PE", main = "E11")
+```
+
+```{r}
+tf = read.delim("Homo_sapiens_TF.txt")
+cotf = read.delim("Homo_sapiens_TF_cofactors.txt")
+
+tf = tf$Symbol
+cotf = cotf$Symbol
+
+table(tf %in% rownames(cepoMatAve))
+table(cotf %in% rownames(cepoMatAve))
+
+par(mfrow = c(4,3))
+#idx1 = cepoMatAve[, "Epiblast_E11"]> 0.2  | cepoMatAve[, "Trophectoderm_E11"] > 0.2
+#idx2 = cepoMatAve[, "Trophectoderm_E11"]> 0.2  | cepoMatAve[, "Primitive.Endoderm_E11"] > 0.2
+#idx3 = cepoMatAve[, "Epiblast_E11"]> 0.2  | cepoMatAve[, "Primitive.Endoderm_E11"] > 0.2
+
+idx1 = (cepoMatAve[, "Epiblast_E11"]> 0.2  | cepoMatAve[, "Trophectoderm_E11"] > 0.2) & rownames(cepoMatAve) %in% c(tf, cotf)
+idx2 = (cepoMatAve[, "Trophectoderm_E11"]> 0.2  | cepoMatAve[, "Primitive.Endoderm_E11"] > 0.2) & rownames(cepoMatAve) %in% c(tf, cotf)
+idx3 = (cepoMatAve[, "Epiblast_E11"]> 0.2  | cepoMatAve[, "Primitive.Endoderm_E11"] > 0.2) & rownames(cepoMatAve) %in% c(tf, cotf)
+
+
+plot(cepoMatAve[, "Epiblast_E5"], cepoMatAve[, "Trophectoderm_E5"], ylab = "Trophectoderm", xlab = "Epiblast", main = "E5")
+points(cepoMatAve[idx1, "Epiblast_E5"], cepoMatAve[idx1, "Trophectoderm_E5"], pch = 19, col = "red")
+plot(cepoMatAve[, "Trophectoderm_E5"], cepoMatAve[, "Primitive.Endoderm_E5"], ylab = "Trophectoderm", xlab = "PE", main = "E5")
+points(cepoMatAve[idx2, "Trophectoderm_E5"], cepoMatAve[idx2, "Primitive.Endoderm_E5"], pch = 19, col = "red")
+plot(cepoMatAve[, "Epiblast_E5"], cepoMatAve[, "Primitive.Endoderm_E5"], ylab = "Epiblast", xlab = "PE", main = "E5")
+points(cepoMatAve[idx3, "Epiblast_E5"], cepoMatAve[idx3, "Primitive.Endoderm_E5"], pch = 19, col = "red")
+
+plot(cepoMatAve[, "Epiblast_E6"], cepoMatAve[, "Trophectoderm_E6"], ylab = "Trophectoderm", xlab = "Epiblast", main = "E6")
+points(cepoMatAve[idx1, "Epiblast_E6"], cepoMatAve[idx1, "Trophectoderm_E6"], pch = 19, col = "red")
+plot(cepoMatAve[, "Trophectoderm_E6"], cepoMatAve[, "Primitive.Endoderm_E6"], ylab = "Trophectoderm", xlab = "PE", main = "E6")
+points(cepoMatAve[idx2, "Trophectoderm_E5"], cepoMatAve[idx2, "Primitive.Endoderm_E6"], pch = 19, col = "red")
+plot(cepoMatAve[, "Epiblast_E6"], cepoMatAve[, "Primitive.Endoderm_E6"], ylab = "Epiblast", xlab = "PE", main = "E6")
+points(cepoMatAve[idx3, "Epiblast_E6"], cepoMatAve[idx3, "Primitive.Endoderm_E6"], pch = 19, col = "red")
+
+plot(cepoMatAve[, "Epiblast_E9"], cepoMatAve[, "Trophectoderm_E9"], ylab = "Trophectoderm", xlab = "Epiblast", main = "E9")
+points(cepoMatAve[idx1, "Epiblast_E9"], cepoMatAve[idx1, "Trophectoderm_E9"], pch = 19, col = "red")
+plot(cepoMatAve[, "Trophectoderm_E9"], cepoMatAve[, "Primitive.Endoderm_E9"], ylab = "Trophectoderm", xlab = "PE", main = "E9")
+points(cepoMatAve[idx2, "Trophectoderm_E9"], cepoMatAve[idx2, "Primitive.Endoderm_E9"], pch = 19, col = "red")
+plot(cepoMatAve[, "Epiblast_E9"], cepoMatAve[, "Primitive.Endoderm_E9"], ylab = "Epiblast", xlab = "PE", main = "E9")
+points(cepoMatAve[idx3, "Epiblast_E9"], cepoMatAve[idx3, "Primitive.Endoderm_E9"], pch = 19, col = "red")
+
+plot(cepoMatAve[, "Epiblast_E11"], cepoMatAve[, "Trophectoderm_E11"], ylab = "Trophectoderm", xlab = "Epiblast", main = "E11")
+points(cepoMatAve[idx1, "Epiblast_E11"], cepoMatAve[idx1, "Trophectoderm_E11"], pch = 19, col = "red")
+plot(cepoMatAve[, "Trophectoderm_E11"], cepoMatAve[, "Primitive.Endoderm_E11"], ylab = "Trophectoderm", xlab = "PE",main = "E11")
+points(cepoMatAve[idx2, "Trophectoderm_E11"], cepoMatAve[idx2, "Primitive.Endoderm_E11"], pch = 19, col = "red")
+plot(cepoMatAve[, "Epiblast_E11"], cepoMatAve[, "Primitive.Endoderm_E11"],ylab = "Epiblast", xlab = "PE", main = "E11")
+points(cepoMatAve[idx3, "Epiblast_E11"], cepoMatAve[idx3, "Primitive.Endoderm_E11"], pch = 19, col = "red")
+```
+
+```{r}
+dftoplot = reshape2::melt(cepoMatAve)
+dftoplot$celltype = sapply(strsplit(as.character(dftoplot$Var2), "_"), "[[", 1)
+dftoplot$timepoint = as.numeric(gsub("E", "", sapply(strsplit(as.character(dftoplot$Var2), "_"), "[[", 2)))
+dftoplot = dftoplot[dftoplot$timepoint != 10,]
+dftoplot = dftoplot[dftoplot$celltype %in% c("Trophectoderm", "Epiblast", "Primitive.Endoderm"), ]
+dftoplot$tf = dftoplot$Var1 %in% tf
+dftoplot$cotf = dftoplot$Var1 %in% cotf
+#dftoplot = dftoplot[!dftoplot$timepoint %in% c(10,12), ]
+
+tmp = dftoplot[,-2] %>%
+  tidyr::spread(celltype, value) %>% na.omit()
+tmp$Epiblast_idx = tmp$Epiblast > quantile(tmp$Epiblast, 0.5)
+tmp$Primitive.Endoderm_idx = tmp$Primitive.Endoderm > quantile(tmp$Epiblast, 0.5)
+tmp$Trophectoderm_idx = tmp$Trophectoderm > quantile(tmp$Epiblast, 0.5)
+
+threshold = 0.65
+tmp = dftoplot[,-2] %>%
+  tidyr::spread(celltype, value) %>% na.omit()
+tmp$Epiblast_idx = tmp$Var1 %in% tmp$Var1[tmp$Epiblast > quantile(tmp$Epiblast, threshold) & tmp$timepoint == 11]
+tmp$Primitive.Endoderm_idx = tmp$Var1 %in% tmp$Var1[tmp$Primitive.Endoderm > quantile(tmp$Primitive.Endoderm, threshold) & tmp$timepoint == 11]
+tmp$Trophectoderm_idx = tmp$Var1 %in% tmp$Var1[tmp$Trophectoderm > quantile(tmp$Trophectoderm, threshold) & tmp$timepoint == 11]
+
+epiblast_abline = quantile(tmp$Epiblast, threshold)
+pe_abline = quantile(tmp$Primitive.Endoderm, threshold)
+te_abline = quantile(tmp$Trophectoderm, threshold)
+
+p1 = tmp %>%
+  ggplot(aes(x = Epiblast, y = Trophectoderm, col = tmp$Epiblast_idx | tmp$Trophectoderm_idx)) + 
+  geom_point(alpha = 0.4, show.legend = FALSE) + 
+  geom_vline(xintercept = epiblast_abline, col = "red", lty = "dotted") + 
+  geom_hline(yintercept = te_abline, col = "red", lty = "dotted") + 
+  scale_color_viridis_d(option = "C") + 
+  facet_wrap(~timepoint, ncol = 6, scales = "fixed") + theme_classic() + 
+  theme(aspect.ratio = 1, panel.background = element_rect(fill = 'grey', colour = 'grey'))
+p2 = tmp %>%
+  ggplot(aes(x = Trophectoderm, y = Primitive.Endoderm, col = tmp$Trophectoderm_idx | tmp$Primitive.Endoderm_idx)) + 
+  geom_point(alpha = 0.4, show.legend = FALSE) + 
+  geom_vline(xintercept = te_abline, col = "red", lty = "dotted") + 
+  geom_hline(yintercept = pe_abline, col = "red", lty = "dotted") + 
+  scale_color_viridis_d(option = "C") + 
+  facet_wrap(~timepoint, ncol = 6, scales = "fixed") + theme_classic() + 
+  theme(aspect.ratio = 1, panel.background = element_rect(fill = 'grey', colour = 'grey'))
+p3 = tmp %>%
+  ggplot(aes(x = Epiblast, y = Primitive.Endoderm, col = tmp$Epiblast_idx | tmp$Primitive.Endoderm_idx)) + 
+  geom_point(alpha = 0.4, show.legend = FALSE) + 
+  geom_vline(xintercept = epiblast_abline, col = "red", lty = "dotted") + 
+  geom_hline(yintercept = pe_abline, col = "red", lty = "dotted") + 
+  scale_color_viridis_d(option = "C") + 
+  facet_wrap(~timepoint, ncol = 6, scales = "fixed") + theme_classic() + 
+  theme(aspect.ratio = 1, panel.background = element_rect(fill = 'grey', colour = 'grey'))
+
+patchwork::wrap_plots(list(p1,p2,p3), ncol = 1)
+```
+
+```{r}
+dftoplot = reshape2::melt(cepoMatAve)
+dftoplot$celltype = sapply(strsplit(as.character(dftoplot$Var2), "_"), "[[", 1)
+dftoplot$timepoint = as.numeric(gsub("E", "", sapply(strsplit(as.character(dftoplot$Var2), "_"), "[[", 2)))
+dftoplot = dftoplot[dftoplot$timepoint != 10,]
+dftoplot = dftoplot[dftoplot$celltype %in% c("Trophectoderm", "Epiblast", "Primitive.Endoderm"), ]
+dftoplot$tf = dftoplot$Var1 %in% tf
+dftoplot$cotf = dftoplot$Var1 %in% cotf
+
+threshold = 0.8
+tmp = dftoplot[,-2] %>%
+  tidyr::spread(celltype, value) %>% na.omit()
+tmp$Epiblast_idx = tmp$Var1 %in% tmp$Var1[tmp$Epiblast > quantile(tmp$Epiblast, threshold) & tmp$timepoint == 11]
+tmp$Primitive.Endoderm_idx = tmp$Var1 %in% tmp$Var1[tmp$Primitive.Endoderm > quantile(tmp$Primitive.Endoderm, threshold) & tmp$timepoint == 11]
+tmp$Trophectoderm_idx = tmp$Var1 %in% tmp$Var1[tmp$Trophectoderm > quantile(tmp$Trophectoderm, threshold) & tmp$timepoint == 11]
+
+epiblast_abline = quantile(tmp$Epiblast, threshold)
+pe_abline = quantile(tmp$Primitive.Endoderm, threshold)
+te_abline = quantile(tmp$Trophectoderm, threshold)
+
+tmp = tmp[order(tmp$tf, decreasing = FALSE),]
+p1 = tmp %>%
+  mutate(index = (Epiblast_idx | Trophectoderm_idx) & tf) %>%
+  mutate(tf2 = sapply(1:length(index), function(i) ifelse(index[[i]], as.character(Var1)[[i]], ""))) %>%
+  filter(timepoint == 11) %>%
+  ggplot(aes(x = Epiblast, y = Trophectoderm, col = index)) + 
+  geom_point(alpha = 0.5, show.legend = FALSE) + 
+  ggrepel::geom_text_repel(aes(label = tf2), show.legend = FALSE, max.overlaps = 50) + 
+  geom_vline(xintercept = epiblast_abline, col = "red", lty = "dotted") + 
+  geom_hline(yintercept = te_abline, col = "red", lty = "dotted") + 
+  scale_color_viridis_d(option = "C") + theme_classic() + 
+  theme(aspect.ratio = 1, panel.background = element_rect(fill = 'grey', colour = 'grey'))
+p2 = tmp %>%
+  mutate(index = (Trophectoderm_idx | Primitive.Endoderm_idx) & tf) %>%
+  mutate(tf2 = sapply(1:length(index), function(i) ifelse(index[[i]], as.character(Var1)[[i]], ""))) %>%
+  filter(timepoint == 11) %>%
+  ggplot(aes(x = Trophectoderm, y = Primitive.Endoderm, col = index)) + 
+  geom_point(alpha = 0.5, show.legend = FALSE) + 
+  ggrepel::geom_text_repel(aes(label = tf2), show.legend = FALSE, max.overlaps = 50) + 
+  geom_vline(xintercept = epiblast_abline, col = "red", lty = "dotted") + 
+  geom_hline(yintercept = te_abline, col = "red", lty = "dotted") + 
+  scale_color_viridis_d(option = "C") + theme_classic() + 
+  theme(aspect.ratio = 1, panel.background = element_rect(fill = 'grey', colour = 'grey'))
+p3 = tmp %>%
+  mutate(index = (Epiblast_idx | Primitive.Endoderm_idx) & tf) %>%
+  mutate(tf2 = sapply(1:length(index), function(i) ifelse(index[[i]], as.character(Var1)[[i]], ""))) %>%
+  filter(timepoint == 11) %>%
+  ggplot(aes(x = Epiblast, y = Primitive.Endoderm, col = index)) + 
+  geom_point(alpha = 0.5, show.legend = FALSE) + 
+  ggrepel::geom_text_repel(aes(label = tf2), show.legend = FALSE, max.overlaps = 50) + 
+  geom_vline(xintercept = epiblast_abline, col = "red", lty = "dotted") + 
+  geom_hline(yintercept = te_abline, col = "red", lty = "dotted") + 
+  scale_color_viridis_d(option = "C") + theme_classic() + 
+  theme(aspect.ratio = 1, panel.background = element_rect(fill = 'grey', colour = 'grey'))
+patchwork::wrap_plots(list(p1,p2,p3), ncol = 3)
+```
+
+```{r}
+dftoplot = reshape2::melt(cepoMatAve)
+dftoplot$celltype = sapply(strsplit(as.character(dftoplot$Var2), "_"), "[[", 1)
+dftoplot$timepoint = as.numeric(gsub("E", "", sapply(strsplit(as.character(dftoplot$Var2), "_"), "[[", 2)))
+dftoplot = dftoplot[dftoplot$timepoint != 10,]
+dftoplot = dftoplot[dftoplot$celltype %in% c("Trophectoderm", "Epiblast", "Primitive.Endoderm"), ]
+dftoplot$tf = dftoplot$Var1 %in% tf
+dftoplot$cotf = dftoplot$Var1 %in% cotf
+
+threshold = 0.65
+tmp = dftoplot[,-2] %>%
+  tidyr::spread(celltype, value) %>% na.omit()
+tmp$Epiblast_idx = tmp$Var1 %in% tmp$Var1[tmp$Epiblast > quantile(tmp$Epiblast, threshold) & tmp$timepoint == 11]
+tmp$Primitive.Endoderm_idx = tmp$Var1 %in% tmp$Var1[tmp$Primitive.Endoderm > quantile(tmp$Primitive.Endoderm, threshold) & tmp$timepoint == 11]
+tmp$Trophectoderm_idx = tmp$Var1 %in% tmp$Var1[tmp$Trophectoderm > quantile(tmp$Trophectoderm, threshold) & tmp$timepoint == 11]
+
+epiblast_abline = quantile(tmp$Epiblast, threshold)
+pe_abline = quantile(tmp$Primitive.Endoderm, threshold)
+te_abline = quantile(tmp$Trophectoderm, threshold)
+
+p1 = tmp[order(tmp$tf, decreasing = FALSE),] %>%
+  ggplot(aes(x = Epiblast, y = Trophectoderm, col = (Epiblast_idx | Trophectoderm_idx) & tf )) + 
+  geom_point(alpha = 0.5, show.legend = FALSE) + 
+  geom_vline(xintercept = epiblast_abline, col = "red", lty = "dotted") + 
+  geom_hline(yintercept = te_abline, col = "red", lty = "dotted") + 
+  scale_color_viridis_d(option = "C") + 
+  facet_wrap(~timepoint, ncol = 6, scales = "fixed") + theme_classic() + 
+  theme(aspect.ratio = 1, panel.background = element_rect(fill = 'grey', colour = 'grey'))
+p2 = tmp[order(tmp$tf, decreasing = FALSE),] %>%
+  ggplot(aes(x = Trophectoderm, y = Primitive.Endoderm, col = (Trophectoderm_idx | Primitive.Endoderm_idx) & tf )) + 
+  geom_point(alpha = 0.5, show.legend = FALSE) + 
+  geom_vline(xintercept = te_abline, col = "red", lty = "dotted") + 
+  geom_hline(yintercept = pe_abline, col = "red", lty = "dotted") + 
+  scale_color_viridis_d(option = "C") + 
+  facet_wrap(~timepoint, ncol = 6, scales = "fixed") + theme_classic() + 
+  theme(aspect.ratio = 1, panel.background = element_rect(fill = 'grey', colour = 'grey'))
+p3 = tmp[order(tmp$tf, decreasing = FALSE),] %>%
+  ggplot(aes(x = Epiblast, y = Primitive.Endoderm, col = (Epiblast_idx | Primitive.Endoderm_idx) & tf )) + 
+  geom_point(alpha = 0.5, show.legend = FALSE) + 
+  geom_vline(xintercept = epiblast_abline, col = "red", lty = "dotted") + 
+  geom_hline(yintercept = pe_abline, col = "red", lty = "dotted") + 
+  scale_color_viridis_d(option = "C") + 
+  facet_wrap(~timepoint, ncol = 6, scales = "fixed") + theme_classic() + 
+  theme(aspect.ratio = 1, panel.background = element_rect(fill = 'grey', colour = 'grey'))
+
+patchwork::wrap_plots(list(p1,p2,p3), ncol = 1)
+```
+
+```{r}
+tmp = dftoplot[,-2] %>%
+  tidyr::spread(celltype, value) %>% na.omit()
+tmp$Epiblast_idx = tmp$Var1 %in% tmp$Var1[tmp$Epiblast > quantile(tmp$Epiblast, 0.8) & tmp$timepoint == 11]
+tmp$Primitive.Endoderm_idx = tmp$Var1 %in% tmp$Var1[tmp$Primitive.Endoderm > quantile(tmp$Epiblast, 0.8) & tmp$timepoint == 11]
+tmp$Trophectoderm_idx = tmp$Var1 %in% tmp$Var1[tmp$Trophectoderm > quantile(tmp$Epiblast, 0.8) & tmp$timepoint == 11]
+
+tmp$Epiblast_TE__q1 = tmp$Epiblast > quantile(tmp$Epiblast, 0.5) & tmp$Trophectoderm > quantile(tmp$Trophectoderm, 0.5) 
+tmp$Epiblast_TE__q2 = tmp$Epiblast > quantile(tmp$Epiblast, 0.5) & tmp$Trophectoderm < quantile(tmp$Trophectoderm, 0.5) 
+tmp$Epiblast_TE__q3 = tmp$Epiblast < quantile(tmp$Epiblast, 0.5) & tmp$Trophectoderm > quantile(tmp$Trophectoderm, 0.5) 
+tmp$Epiblast_TE__q4 = tmp$Epiblast < quantile(tmp$Epiblast, 0.5) & tmp$Trophectoderm < quantile(tmp$Trophectoderm, 0.5) 
+
+tmp$Epiblast_PE__q1 = tmp$Epiblast > quantile(tmp$Epiblast, 0.5) & tmp$Primitive.Endoderm > quantile(tmp$Primitive.Endoderm, 0.5) 
+tmp$Epiblast_PE__q2 = tmp$Epiblast > quantile(tmp$Epiblast, 0.5) & tmp$Primitive.Endoderm < quantile(tmp$Primitive.Endoderm, 0.5) 
+tmp$Epiblast_PE__q3 = tmp$Epiblast < quantile(tmp$Epiblast, 0.5) & tmp$Primitive.Endoderm > quantile(tmp$Primitive.Endoderm, 0.5) 
+tmp$Epiblast_PE__q4 = tmp$Epiblast < quantile(tmp$Epiblast, 0.5) & tmp$Primitive.Endoderm < quantile(tmp$Primitive.Endoderm, 0.5) 
+
+tmp$TE_PE__q1 = tmp$Trophectoderm > quantile(tmp$Trophectoderm, 0.5) & tmp$Primitive.Endoderm > quantile(tmp$Primitive.Endoderm, 0.5) 
+tmp$TE_PE__q2 = tmp$Trophectoderm > quantile(tmp$Trophectoderm, 0.5) & tmp$Primitive.Endoderm < quantile(tmp$Primitive.Endoderm, 0.5) 
+tmp$TE_PE__q3 = tmp$Trophectoderm < quantile(tmp$Trophectoderm, 0.5) & tmp$Primitive.Endoderm > quantile(tmp$Primitive.Endoderm, 0.5) 
+tmp$TE_PE__q4 = tmp$Trophectoderm < quantile(tmp$Trophectoderm, 0.5) & tmp$Primitive.Endoderm < quantile(tmp$Primitive.Endoderm, 0.5) 
+
+pList = lapply(c(8:10), function(i) {
+  
+  cty = colnames(tmp)[[i]]
+  tmp2 = tmp[tmp[,i] == TRUE,]
+  tab1 = tmp2 %>%
+    group_by(timepoint) %>%
+    summarise(Epi_TE__q1 = sum(Epiblast_TE__q1),
+              Epi_TE__q2 = sum(Epiblast_TE__q2),
+              Epi_TE__q3 = sum(Epiblast_TE__q3),
+              Epi_TE__q4 = sum(Epiblast_TE__q4),
+              PE_TE__q1 = sum(TE_PE__q1),
+              PE_TE__q2 = sum(TE_PE__q2),
+              PE_TE__q3 = sum(TE_PE__q3),
+              PE_TE__q4 = sum(TE_PE__q4),
+              Epi_PE__q1 = sum(Epiblast_PE__q1),
+              Epi_PE__q2 = sum(Epiblast_PE__q2),
+              Epi_PE__q3 = sum(Epiblast_PE__q3),
+              Epi_PE__q4 = sum(Epiblast_PE__q4))
+  timepoint = tab1$timepoint
+  tab1$timepoint = NULL
+  tab = do.call(cbind, tab1)
+  colnames(tab) = colnames(tab1)
+  tab = reshape2::melt(tab)
+  tab$timepoint = rep(timepoint, ncol(tab1))
+  tab$Var2 = as.character(tab$Var2)
+  tab$group = sapply(strsplit(tab$Var2, "__"), "[[", 1)
+  tab$q_group = sapply(strsplit(tab$Var2, "__"), "[[", 2)
+  
+  p = ggplot(tab, aes(x = as.factor(timepoint), y = as.numeric(value), fill = q_group)) + 
+    geom_bar(stat = "identity", position = "fill") +facet_wrap(~group, ncol = 3) + ggtitle(cty) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  
+  return(p)
+  
+})
+
+patchwork::wrap_plots(pList, ncol = 3) + patchwork::plot_layout(guides = "collect")
+```
+
+```{r}
+scatterplot3d::scatterplot3d(x = rank(cepoMatAve[, "Epiblast_E11"]),
+                             y = rank(cepoMatAve[, "Trophectoderm_E11"]),
+                             z = rank(cepoMatAve[, "Primitive.Endoderm_E11"]))
+
+library(dplyr)
+library(plotly)
+
+pal <- c("#E8DB7D", "#1C448E")
+pal <- setNames(pal, c("TRUE", "FALSE"))
+
+p3d <- plot_ly(
+  as.data.frame(cepoMatAve), 
+  x = ~Epiblast_E11, 
+  y = ~Trophectoderm_E11, 
+  z = ~Primitive.Endoderm_E11,
+  text = ~(rownames(cepoMatAve)),
+  color = ~rownames(cepoMatAve) %in% tf,
+  colors = pal
+) %>%
+  add_markers() %>%
+  layout(
+    scene = list(xaxis = list(title = 'Epiblast'),
+                 yaxis = list(title = 'Trophectoderm'),
+                 zaxis = list(title = 'Hypoblast'))
+  )
+
+p3d
+
+library(htmlwidgets)
+saveWidget(p3d, "plotly.html", selfcontained = F, libdir = "lib")
+```
+
+```{r}
+geneList = unlist(lapply(c(5:9,11), function(e) {
+  
+  print(e)
+  idx1 = grepl(paste0("Epiblast_E", e), colnames(cepoMatAve))
+  idx2 = grepl(paste0("Trophectoderm_E", e), colnames(cepoMatAve))
+  idx3 = grepl(paste0("Primitive.Endoderm_E", e), colnames(cepoMatAve))
+  
+  EpiGenes = names(sort(cepoMatAve[, idx1], decreasing = TRUE)[1:100])
+  TEGenes = names(sort(cepoMatAve[, idx2], decreasing = TRUE)[1:100])
+  PEGenes = names(sort(cepoMatAve[, idx3], decreasing = TRUE)[1:100])
+  
+  topGenes = list(epi = EpiGenes, te = TEGenes, pe = PEGenes)
+  UpSetR::upset(UpSetR::fromList(topGenes))
+  names(topGenes) = paste0("E", e, "_", names(topGenes))
+  return(topGenes)
+}), recursive = FALSE)
+
+UpSetR::upset(UpSetR::fromList(geneList), nsets = 18)
+
+lapply(c(5:9,11), function(e) {
+  
+  print(e)
+  idx1 = grepl(paste0("Epiblast_E", e), colnames(cepoMatAve))
+  idx2 = grepl(paste0("Trophectoderm_E", e), colnames(cepoMatAve))
+  idx3 = grepl(paste0("Primitive.Endoderm_E", e), colnames(cepoMatAve))
+  
+  EpiGenes = names(sort(cepoMatAve[, idx1], decreasing = TRUE)[1:100])
+  TEGenes = names(sort(cepoMatAve[, idx2], decreasing = TRUE)[1:100])
+  PEGenes = names(sort(cepoMatAve[, idx3], decreasing = TRUE)[1:100])
+  
+  topGenes = list(epi = EpiGenes, te = TEGenes, pe = PEGenes)
+  UpSetR::upset(UpSetR::fromList(topGenes))
+
+})
+```
+
+```{r}
+timePlot = lapply(c(5:9,11), function(e) {
+  
+  print(e)
+  idx1 = grepl(paste0("Epiblast_E", e), colnames(cepoMatAve))
+  idx2 = grepl(paste0("Trophectoderm_E", e), colnames(cepoMatAve))
+  idx3 = grepl(paste0("Primitive.Endoderm_E", e), colnames(cepoMatAve))
+  
+  EpiGenes = sort(cepoMatAve[, idx1], decreasing = TRUE)[1:100]
+  TEGenes = sort(cepoMatAve[, idx2], decreasing = TRUE)[1:100]
+  PEGenes = sort(cepoMatAve[, idx3], decreasing = TRUE)[1:100]
+  
+  topGenes = list(epi = EpiGenes, te = TEGenes, pe = PEGenes)
+  UpSetR::upset(UpSetR::fromList(topGenes))
+  
+  df_prop = do.call(rbind, lapply(1:length(sceList), function(i) {
+    
+    x = sceList[[i]]
+    df2 = do.call(rbind, lapply(names(topGenes), function(y) {
+      mat = logcounts(x[names(topGenes[[y]]),])
+      geneProp = colSums(mat > 0)/nrow(mat)
+      df = data.frame(
+        dataset = names(sceList)[[i]],
+        cellID = colnames(x),
+        cty = y,
+        prop = geneProp
+      )
+      df$uniqueID = paste0(df$dataset, "_", df$cellID)
+      
+      return(df)
+    }))
+    return(df2)
+    
+  }))
+  
+  topGenesUMAP = lapply(c("te", "pe", "epi"), function(cty) {
+    
+    cellstoplot = 1:ncol(seu_invivo)
+    names(cellstoplot) = paste0(seu_invivo$dataset, "_", colnames(seu_invivo))
+    tmp = df_prop[df_prop$cty == cty, ]
+    rownames(tmp) = tmp$uniqueID
+    cellstoplot[names(cellstoplot)] = tmp[names(cellstoplot), "prop"]
+    
+    cty_cols = RColorBrewer::brewer.pal(12, "Paired")
+    cty_cols = colorRampPalette(cty_cols)(length(unique(seu_invivo$major_celltype_final_scReClassify)))
+    names(cty_cols) = unique(seu_invivo$major_celltype_final_scReClassify)
+    
+    time_cols = RColorBrewer::brewer.pal(8, "Spectral")
+    time_cols = colorRampPalette(time_cols)(length(unique(seu_invivo$timepoint2)))
+    names(time_cols) = as.character(c(3:12))
+    
+    dftoplot = data.frame(
+      DM1 = Seurat::Embeddings(seu_invivo, reduction = 'umap')[,1],
+      DM2 = Seurat::Embeddings(seu_invivo, reduction = 'umap')[,2],
+      prop = cellstoplot,
+      celltype = seu_invivo$major_celltype_final_scReClassify
+    )
+    
+    p1 = ggplot(dftoplot, aes(DM1, DM2, col = celltype)) + 
+      ggrastr::geom_point_rast() + 
+      scale_color_manual(values = cty_cols) + theme_classic()
+    p2 = ggplot(dftoplot, aes(DM1, DM2, col = prop)) + 
+      ggrastr::geom_point_rast(alpha = 0.5) + 
+      scale_color_gradient2(low = scales::muted("red"), mid = "white", high = "black") + 
+      theme_classic() + ggtitle(cty, subtitle = paste0("E", e))  + 
+      theme(legend.position = "none")
+    
+    patchwork::wrap_plots(list(p1,p2), ncol = 2)
+    
+    return(p2)
+  })
+  
+  p = patchwork::wrap_plots(topGenesUMAP, nrow = 3)
+  return(p)
+  
+})
+patchwork::wrap_plots(timePlot, ncol = 6)
+```
+
+```{r}
+proptoPlot = do.call(rbind, lapply(c(5:11), function(e) {
+  
+  print(e)
+  idx1 = grepl(paste0("Epiblast_E", e), colnames(cepoMatAve))
+  idx2 = grepl(paste0("Trophectoderm_E", e), colnames(cepoMatAve))
+  idx3 = grepl(paste0("Primitive.Endoderm_E", e), colnames(cepoMatAve))
+  
+  EpiGenes = sort(cepoMatAve[, idx1], decreasing = TRUE)[1:100]
+  TEGenes = sort(cepoMatAve[, idx2], decreasing = TRUE)[1:100]
+  PEGenes = sort(cepoMatAve[, idx3], decreasing = TRUE)[1:100]
+  
+  topGenes = list(epi = EpiGenes, te = TEGenes, pe = PEGenes)
+  UpSetR::upset(UpSetR::fromList(topGenes))
+  
+  df_prop = do.call(rbind, lapply(1:length(sceList), function(i) {
+    
+    x = sceList[[i]]
+    df2 = do.call(rbind, lapply(names(topGenes), function(y) {
+      mat = logcounts(x[names(topGenes[[y]]),])
+      geneProp = colSums(mat > 0)/nrow(mat)
+      df = data.frame(
+        dataset = names(sceList)[[i]],
+        cellID = colnames(x),
+        cty = y,
+        prop = geneProp,
+        timepoint_anchor = e
+      )
+      df$uniqueID = paste0(df$dataset, "_", df$cellID)
+      
+      return(df)
+    }))
+    return(df2)
+    
+  }))
+  
+  cty = seu_invivo$major_celltype_final_scReClassify
+  names(cty) = paste0(seu_invivo$dataset, "_", colnames(seu_invivo))
+  
+  timepoint = seu_invivo$timepoint2
+  names(timepoint) = paste0(seu_invivo$dataset, "_", colnames(seu_invivo))
+  
+  df_prop$celltype = cty[df_prop$uniqueID]
+  df_prop$timepoint = timepoint[df_prop$uniqueID]
+  
+  return(df_prop)
+  
+}))
+
+hist(proptoPlot$prop)
+
+proptoPlot$proplogical = proptoPlot$prop > 0.7
+proptoPlot %>%
+  filter(cty == "te") %>%
+  ggplot(aes(x = factor(timepoint_anchor), fill = proplogical)) + 
+  geom_bar(position = "fill") + 
+  facet_wrap(~celltype+timepoint, ncol = 40)
+```
+
+```{r}
+proptoPlot = do.call(rbind, lapply(c(5:11), function(e) {
+  
+  print(e)
+  idx1 = grepl(paste0("Epiblast_E", e), colnames(cepoMatAve))
+  idx2 = grepl(paste0("Trophectoderm_E", e), colnames(cepoMatAve))
+  idx3 = grepl(paste0("Primitive.Endoderm_E", e), colnames(cepoMatAve))
+  
+  EpiGenes = sort(cepoMatAve[, idx1], decreasing = TRUE)[1:100]
+  TEGenes = sort(cepoMatAve[, idx2], decreasing = TRUE)[1:100]
+  PEGenes = sort(cepoMatAve[, idx3], decreasing = TRUE)[1:100]
+  
+  topGenes = list(epi = EpiGenes, te = TEGenes, pe = PEGenes)
+  UpSetR::upset(UpSetR::fromList(topGenes))
+  
+  df_prop = do.call(rbind, lapply(1:length(sceList), function(i) {
+    
+    x = sceList[[i]]
+    df2 = do.call(rbind, lapply(names(topGenes), function(y) {
+      mat_all = logcounts(x[gsub("pe.|te.|epi.|", "", names(unlist(topGenes))),])
+      mat = logcounts(x[names(topGenes[[y]]),])
+      geneProp = colSums(mat)/colSums(mat_all)
+      df = data.frame(
+        dataset = names(sceList)[[i]],
+        cellID = colnames(x),
+        cty = y,
+        prop = geneProp,
+        timepoint_anchor = e
+      )
+      df$uniqueID = paste0(df$dataset, "_", df$cellID)
+      
+      return(df)
+    }))
+    return(df2)
+    
+  }))
+  
+  cty = seu_invivo$major_celltype_final_scReClassify
+  names(cty) = paste0(seu_invivo$dataset, "_", colnames(seu_invivo))
+  
+  timepoint = seu_invivo$timepoint2
+  names(timepoint) = paste0(seu_invivo$dataset, "_", colnames(seu_invivo))
+  
+  df_prop$celltype = cty[df_prop$uniqueID]
+  df_prop$timepoint = timepoint[df_prop$uniqueID]
+  
+  return(df_prop)
+  
+}))
+
+hist(proptoPlot$prop)
+
+ProptoPlot2 = proptoPlot %>%
+  group_by(cty, timepoint_anchor, celltype, timepoint) %>%
+  summarise(ave = mean(prop))
+
+ProptoPlot2 %>%
+  filter(timepoint %in% c(5:11) & celltype %in% c("Epiblast", "Trophectoderm", "Primitive Endoderm")) %>%
+  mutate(celltype = factor(celltype, levels = c("Trophectoderm", "Epiblast", "Primitive Endoderm"))) %>%
+  ggplot(aes(x = factor(timepoint_anchor), y = ave, col = factor(cty))) + 
+  geom_point()+ ylab("proportion of gene expression contributed by top 100 lineage markers") + 
+  xlab("Top 100 Cepo genes at embryonic timepoint") + 
+  facet_wrap(~celltype+timepoint, ncol = 7)
+```
+
+```{r}
+hybridPlot = lapply(c(5:11), function(e) {
+  
+  print(e)
+  idx1 = grepl(paste0("Epiblast_E", e), colnames(cepoMatAve))
+  idx2 = grepl(paste0("Trophectoderm_E", e), colnames(cepoMatAve))
+  idx3 = grepl(paste0("Primitive.Endoderm_E", e), colnames(cepoMatAve))
+  
+  EpiGenes = sort(cepoMatAve[, idx1], decreasing = TRUE)[1:100]
+  TEGenes = sort(cepoMatAve[, idx2], decreasing = TRUE)[1:100]
+  PEGenes = sort(cepoMatAve[, idx3], decreasing = TRUE)[1:100]
+  
+  topGenes = list(epi = EpiGenes, te = TEGenes, pe = PEGenes)
+  UpSetR::upset(UpSetR::fromList(topGenes))
+  
+  df_prop = do.call(rbind, lapply(1:length(sceList), function(i) {
+    
+    x = sceList[[i]]
+    df2 = do.call(rbind, lapply(names(topGenes), function(y) {
+      mat = logcounts(x[names(topGenes[[y]]),])
+      geneProp = colSums(mat > 0)/nrow(mat)
+      df = data.frame(
+        dataset = names(sceList)[[i]],
+        cellID = colnames(x),
+        cty = y,
+        prop = geneProp
+      )
+      df$uniqueID = paste0(df$dataset, "_", df$cellID)
+      
+      return(df)
+    }))
+    return(df2)
+    
+  }))
+  
+  df_prop2 = df_prop %>%
+    group_by(uniqueID, cty) %>%
+    summarise(prop = prop > 0.5)
+  df_prop2 = df_prop2 %>% tidyr::spread(cty, prop) %>% as.data.frame()
+  rownames(df_prop2) = df_prop2$uniqueID
+  df_prop2 = df_prop2[,-1]
+  
+  table(rowSums(df_prop2[, 1:3]))
+  
+  df_prop2$pe_te =  df_prop2$pe & df_prop2$te & !df_prop2$epi
+  df_prop2$epi_te =  df_prop2$epi & df_prop2$te & !df_prop2$pe 
+  df_prop2$epi_pe =  df_prop2$epi  & df_prop2$pe & !df_prop2$te
+  df_prop2$all =  df_prop2$epi & df_prop2$pe & df_prop2$te 
+  
+  cellstoplot = 1:ncol(seu_invivo)
+  names(cellstoplot) = paste0(seu_invivo$dataset, "_", colnames(seu_invivo))
+  
+  df_prop2 = df_prop2[names(cellstoplot),]
+  
+  dftoplot = data.frame(
+    DM1 = Seurat::Embeddings(seu_invivo, reduction = 'umap')[,1],
+    DM2 = Seurat::Embeddings(seu_invivo, reduction = 'umap')[,2],
+    time = seu_invivo$timepoint2,
+    pe_te = df_prop2$pe_te,
+    epi_te = df_prop2$epi_te,
+    epi_pe = df_prop2$epi_pe,
+    all = df_prop2$all,
+    celltype = seu_invivo$major_celltype_final_scReClassify,
+    anchor_time = e
+  )
+  
+  dftoplot$pe_te = dftoplot$pe_te & dftoplot$time == e
+  dftoplot$epi_te = dftoplot$epi_te & dftoplot$time == e
+  dftoplot$epi_pe = dftoplot$epi_pe & dftoplot$time == e
+  dftoplot$all = dftoplot$all & dftoplot$time == e
+  
+  p1 = ggplot(dftoplot[order(dftoplot$pe_te),], aes(DM1, DM2, col = pe_te)) + 
+    ggrastr::geom_point_rast() + theme_classic() + ggtitle("PE_TE", subtitle = paste0("E", e)) + theme(legend.position = "none")
+  p2 = ggplot(dftoplot[order(dftoplot$epi_te),], aes(DM1, DM2, col = epi_te)) + 
+    ggrastr::geom_point_rast() + theme_classic() + ggtitle("EPI_TE", subtitle = paste0("E", e))+ theme(legend.position = "none")
+  p3 = ggplot(dftoplot[order(dftoplot$epi_pe),], aes(DM1, DM2, col = epi_pe)) + 
+    ggrastr::geom_point_rast() + theme_classic() + ggtitle("EPI_PE", subtitle = paste0("E", e))+ theme(legend.position = "none")
+  p4 = ggplot(dftoplot[order(dftoplot$all),], aes(DM1, DM2, col = all)) + 
+    ggrastr::geom_point_rast() + theme_classic() + ggtitle("ALL", subtitle = paste0("E", e))+ theme(legend.position = "none")
+  
+  p = patchwork::wrap_plots(list(p1,p2,p3,p4), nrow = 4)
+  
+  return(p)
+  
+})
+p = patchwork::wrap_plots(hybridPlot, ncol = 7)
+p %>% ggsave(filename = "test_v2.png", width = 20, height = 12)
+```
+
+```{r}
+dftoPlot = lapply(c(5:11), function(e) {
+  
+  print(e)
+  idx1 = grepl(paste0("Epiblast_E", e), colnames(cepoMatAve))
+  idx2 = grepl(paste0("Trophectoderm_E", e), colnames(cepoMatAve))
+  idx3 = grepl(paste0("Primitive.Endoderm_E", e), colnames(cepoMatAve))
+  
+  EpiGenes = sort(cepoMatAve[, idx1], decreasing = TRUE)[1:100]
+  TEGenes = sort(cepoMatAve[, idx2], decreasing = TRUE)[1:100]
+  PEGenes = sort(cepoMatAve[, idx3], decreasing = TRUE)[1:100]
+  
+  topGenes = list(epi = EpiGenes, te = TEGenes, pe = PEGenes)
+  UpSetR::upset(UpSetR::fromList(topGenes))
+  
+  df_prop = do.call(rbind, lapply(1:length(sceList), function(i) {
+    
+    x = sceList[[i]]
+    df2 = do.call(rbind, lapply(names(topGenes), function(y) {
+      mat = logcounts(x[names(topGenes[[y]]),])
+      geneProp = colSums(mat > 0)/nrow(mat)
+      df = data.frame(
+        dataset = names(sceList)[[i]],
+        cellID = colnames(x),
+        cty = y,
+        prop = geneProp
+      )
+      df$uniqueID = paste0(df$dataset, "_", df$cellID)
+      
+      return(df)
+    }))
+    return(df2)
+    
+  }))
+  
+  df_prop2 = df_prop %>%
+    group_by(uniqueID, cty) %>%
+    summarise(prop = prop > 0.5)
+  df_prop2 = df_prop2 %>% tidyr::spread(cty, prop) %>% as.data.frame()
+  rownames(df_prop2) = df_prop2$uniqueID
+  df_prop2 = df_prop2[,-1]
+  
+  table(rowSums(df_prop2[, 1:3]))
+  
+  df_prop2$pe_te =  df_prop2$pe & df_prop2$te & !df_prop2$epi
+  df_prop2$epi_te =  df_prop2$epi & df_prop2$te & !df_prop2$pe 
+  df_prop2$epi_pe =  df_prop2$epi  & df_prop2$pe & !df_prop2$te
+  df_prop2$epi_pe_te =  df_prop2$epi & df_prop2$pe & df_prop2$te 
+  
+  cellstoplot = 1:ncol(seu_invivo)
+  names(cellstoplot) = paste0(seu_invivo$dataset, "_", colnames(seu_invivo))
+  
+  df_prop2 = df_prop2[names(cellstoplot),]
+  
+  dftoplot = data.frame(
+    DM1 = Seurat::Embeddings(seu_invivo, reduction = 'umap')[,1],
+    DM2 = Seurat::Embeddings(seu_invivo, reduction = 'umap')[,2],
+    time = seu_invivo$timepoint2,
+    umi = seu_invivo$nCount_RNA,
+    gene = seu_invivo$nFeature_RNA,
+    treatment = seu_invivo$treatment,
+    pe_te = df_prop2$pe_te,
+    epi_te = df_prop2$epi_te,
+    epi_pe = df_prop2$epi_pe,
+    epi_pe_te = df_prop2$epi_pe_te,
+    celltype = seu_invivo$major_celltype_final_scReClassify,
+    cellID = paste0(seu_invivo$dataset, "_", colnames(seu_invivo)),
+    anchor_time = e
+  )
+  
+  dftoplot$pe_te = dftoplot$pe_te & dftoplot$time == e
+  dftoplot$epi_te = dftoplot$epi_te & dftoplot$time == e
+  dftoplot$epi_pe = dftoplot$epi_pe & dftoplot$time == e
+  dftoplot$epi_pe_te = dftoplot$epi_pe_te & dftoplot$time == e
+  dftoplot$all = dftoplot$pe_te | dftoplot$epi_te | dftoplot$epi_pe | dftoplot$epi_pe_te
+  
+  dftoplot$celltype_with_hybrid = dftoplot$celltype
+  dftoplot$celltype_with_hybrid[dftoplot$pe_te] = "PE_TE"
+  dftoplot$celltype_with_hybrid[dftoplot$epi_te] = "EPI_TE"
+  dftoplot$celltype_with_hybrid[dftoplot$epi_pe] = "EPI_PE"
+  dftoplot$celltype_with_hybrid[dftoplot$epi_pe_te] = "EPI_PE_TE"
+  
+  return(dftoplot)
+  
+})
+dftoPlot = do.call(rbind, dftoPlot)
+
+hybrid_final = dftoPlot$cellID[dftoPlot$all == TRUE]
+dftoPlot$hybrid = dftoPlot$cellID %in% hybrid_final
+annotation_hybrid = sapply(hybrid_final, function(x) {
+  
+  idx = dftoPlot$cellID == x
+  return(names(sort(table(dftoPlot$celltype_with_hybrid[idx]))[1]))
+  
+})
+names(annotation_hybrid) <- hybrid_final
+
+celltype_with_hybrid = seu_invivo$major_celltype_final_scReClassify
+names(celltype_with_hybrid) = paste0(seu_invivo$dataset, "_", colnames(seu_invivo))
+celltype_with_hybrid[hybrid_final] = annotation_hybrid
+
+df = data.frame(
+  DM1 = Embeddings(seu_invivo, "umap")[,1],
+  DM2 = Embeddings(seu_invivo, "umap")[,2],
+  time = seu_invivo$timepoint2,
+  celltype = seu_invivo$major_celltype_final_scReClassify,
+  is.hybrid = celltype_with_hybrid %in% c("EPI_PE_TE","EPI_TE","PE_TE","EPI_PE"),
+  celltype_with_hybrid = celltype_with_hybrid,
+  treatment = seu_invivo$treatment
+)
+
+cty_cols2 <- c("#3777FF", "#FFB5C2", "#FFE156", "#A5FFD6")
+names(cty_cols2) <- c("EPI_PE_TE","EPI_TE","PE_TE","EPI_PE")
+cty_cols2 <- c(cty_cols, cty_cols2)
+
+df %>% 
+  ggplot(aes(x = DM1, y = DM2, col= celltype_with_hybrid)) + 
+  ggrastr::geom_point_rast() + 
+  scale_color_manual(values = cty_cols2) + 
+  facet_wrap(~is.hybrid, ncol = 2) + theme_classic()
+```
+
+```{r}
+hybrid_final = dftoPlot$cellID[dftoPlot$all == TRUE]
+dftoPlot$hybrid = dftoPlot$cellID %in% hybrid_final
+annotation_hybrid = sapply(hybrid_final, function(x) {
+  
+  idx = dftoPlot$cellID == x
+  return(names(sort(table(dftoPlot$celltype_with_hybrid[idx]))[1]))
+  
+})
+names(annotation_hybrid) <- hybrid_final
+
+celltype_with_hybrid = seu_invivo$major_celltype_final_scReClassify
+names(celltype_with_hybrid) = paste0(seu_invivo$dataset, "_", colnames(seu_invivo))
+celltype_with_hybrid[hybrid_final] = annotation_hybrid
+
+df = data.frame(
+  time = seu_invivo$timepoint2,
+  celltype = seu_invivo$major_celltype_final_scReClassify,
+  is.hybrid = celltype_with_hybrid %in% c("EPI_PE_TE","EPI_TE","PE_TE","EPI_PE"),
+  celltype_with_hybrid = celltype_with_hybrid,
+  treatment = seu_invivo$treatment
+)
+
+p1 = df %>%
+  #filter(treatment == "NO") %>%
+  mutate(celltype_with_hybrid = factor(celltype_with_hybrid, levels = rev(c("EPI_PE_TE","EPI_TE","PE_TE","EPI_PE", "Pre-morula","Morula","Early blastocyst","Inner cell mass","Primitive Endoderm","Epiblast","Trophectoderm")))) %>%
+  ggplot(aes(x = as.factor(time), fill = celltype_with_hybrid)) + 
+  scale_fill_manual(values = cty_cols2) + 
+  geom_bar(position = "fill") + theme_classic()
+
+p2 = df %>%
+  ggplot(aes(x = as.factor(time), fill = is.hybrid)) + 
+  geom_bar(position = "fill") + theme_classic()
+
+patchwork::wrap_plots(list(p1,p2), ncol = 2)
+
+df %>%
+  mutate(celltype = factor(celltype, levels = c("EPI_PE_TE","EPI_TE","PE_TE","EPI_PE", "Pre-morula","Morula","Early blastocyst","Inner cell mass","Primitive Endoderm","Epiblast","Trophectoderm"))) %>%
+  ggplot(aes(x = as.factor(celltype), fill = as.factor(time))) + 
+  scale_fill_brewer(palette = "Spectral") + 
+  geom_bar(position = "fill") + theme_classic()
+
+df %>%
+  mutate(celltype = factor(celltype, levels = c("Pre-morula","Morula","Early blastocyst","Inner cell mass","Primitive Endoderm","Epiblast","Trophectoderm"))) %>%
+  ggplot(aes(x = as.factor(time), fill = as.factor(time))) + 
+  scale_fill_brewer(palette = "Spectral") + facet_wrap(~celltype, ncol = 7) +
+  geom_bar(position = "dodge") + theme_classic()
+
+p1 = df %>%
+  mutate(celltype_with_hybrid = factor(celltype_with_hybrid, levels = c("EPI_PE_TE","EPI_TE","PE_TE","EPI_PE","Pre-morula","Morula","Early blastocyst","Inner cell mass","Primitive Endoderm","Epiblast","Trophectoderm"))) %>%
+  ggplot(aes(x = as.factor(celltype_with_hybrid), fill = as.factor(time))) + 
+  scale_fill_brewer(palette = "Spectral") + 
+  geom_bar(position = "fill") + theme_classic() + coord_flip()
+
+p2 = df %>%
+  mutate(celltype_with_hybrid = factor(celltype_with_hybrid, levels = c("EPI_PE_TE","EPI_TE","PE_TE","EPI_PE","Pre-morula","Morula","Early blastocyst","Inner cell mass","Primitive Endoderm","Epiblast","Trophectoderm"))) %>%
+  ggplot(aes(x = as.factor(celltype_with_hybrid), fill = as.factor(celltype))) + 
+  scale_fill_manual(values = cty_cols) + 
+  geom_bar(position = "fill") + theme_classic() + coord_flip()
+
+p1 + p2
+```

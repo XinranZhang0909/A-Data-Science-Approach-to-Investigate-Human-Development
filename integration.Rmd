@@ -1,0 +1,535 @@
+---
+title: "integration"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(DelayedMatrixStats)
+  library(Seurat)
+  library(ggplot2)
+  library(ggthemes)
+  library(scater)
+  library(scReClassify)
+  library(dplyr)
+})
+set.seed(2022)
+```
+
+```{r}
+sce_EMTAB3929 = readRDS("../Data/human_embryo_E-MTAB-3929.RDS")
+sce_2 = readRDS("../Data/human_embryo_2.RDS")
+sce_3 = readRDS("../Data/human_embryo_3.RDS")
+sce_EMTAB9388 = readRDS("../Data/human_embryo_E-MTAB-9388.RDS")
+```
+
+```{r}
+convert_to_seurat <- function(sce, meta = TRUE, ...) {
+  drops <- rownames(sce)
+  if (meta) 
+    meta.data <- colData(sce)
+  else meta.data <- NULL
+  counts <- counts(sce)[drops, ,drop = FALSE]
+  seur <- Seurat::CreateSeuratObject(counts = counts, meta.data = as.data.frame(meta.data))
+  return(seur)
+}
+
+seu_EMTAB3929 <- convert_to_seurat(sce_EMTAB3929, meta = TRUE)
+seu_EMTAB3929 <- NormalizeData(seu_EMTAB3929,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_EMTAB3929 <- FindVariableFeatures(seu_EMTAB3929, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_data2 <- convert_to_seurat(sce_2, meta = TRUE)
+seu_data2 <- NormalizeData(seu_data2,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_data2 <- FindVariableFeatures(seu_data2, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_data3 <- convert_to_seurat(sce_3, meta = TRUE)
+seu_data3 <- NormalizeData(seu_data3,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_data3 <- FindVariableFeatures(seu_data3, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_EMTAB9388 <- convert_to_seurat(sce_EMTAB9388, meta = TRUE)
+seu_EMTAB9388 <- NormalizeData(seu_EMTAB9388,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_EMTAB9388 <- FindVariableFeatures(seu_EMTAB9388, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_list_invivo = c(seu_EMTAB3929,seu_data2,seu_data3,seu_EMTAB9388)
+
+features_invivo <- SelectIntegrationFeatures(object.list = seu_list_invivo,
+                                      nfeatures = 2000)
+
+seu_list_invivo <- lapply(X = seu_list_invivo , FUN = function(x) {
+    x <- ScaleData(x, features = features_invivo, verbose = FALSE)
+    x <- RunPCA(x, features = features_invivo, verbose = FALSE, npcs = 50)
+    #
+    #x <- x[,x$celltype != 'Trophoectoderm']
+    return(x)
+})
+
+seu_anchors_invivo <- FindIntegrationAnchors(object.list = seu_list_invivo, 
+                                      anchor.features = features_invivo, 
+                                      reduction = "cca",
+                                      dims = 1:15,
+                                      k.anchor = 5) 
+
+seu_combined_invivo <- IntegrateData(anchorset = seu_anchors_invivo)
+
+DefaultAssay(seu_combined_invivo) <- "integrated"
+
+seu_combined_invivo <- ScaleData(seu_combined_invivo, verbose = FALSE)
+seu_combined_invivo <- RunPCA(seu_combined_invivo, npcs = 15, ndims.print = 1:10, verbose = FALSE) 
+seu_combined_invivo <- RunUMAP(seu_combined_invivo, 
+                        reduction = "pca", 
+                        dims = 1:10)
+
+major_celltype = seu_combined_invivo$celltype
+major_celltype[major_celltype %in% c("5.Early trophectoderm", "8.TE.NR2F2-", "9.TE.NR2F2+", "TE")] = "Trophectoderm"
+major_celltype[major_celltype %in% c("6.Epiblast", "Epi")] = "Epiblast"
+major_celltype[major_celltype %in% c("Hypo")] = "Hypoblast"
+major_celltype[major_celltype %in% c("YS Mesoderm")] = "ExE Mesoderm"
+major_celltype[major_celltype %in% c("Advanced Mesoderm", "Axial Mesoderm", "Emergent Mesoderm", "Nascent Mesoderm", "ExE Mesoderm")] = "Mesoderm"
+major_celltype[major_celltype %in% c("Amnion", "NNE")] = "Non-Neural Ectoderm"
+major_celltype[major_celltype %in% c("7.Primitive endoderm", "DE(NP)", "DE(P)", "YS Endoderm")] = "Endoderm"
+major_celltype[major_celltype %in% c("Blood Progenitors", "Erythro-Myeloid Progenitors", "Hemogenic Endothelium", "YS Endoderm")] = "Hemogenic Endothelial Progenitors"
+major_celltype[major_celltype %in% c("PGC")] = "Primitive Streak"
+major_celltype[major_celltype %in% c("1.Pre-morula")] = "Pre-morula"
+major_celltype[major_celltype %in% c("2.Morula")] = "Morula"
+major_celltype[major_celltype %in% c("3.Early blastocyst")] = "Early blastocyst"
+major_celltype[major_celltype %in% c("4.Inner cell mass")] = "Inner cell mass"
+major_celltype[major_celltype %in% c("Non-Neural Ectoderm","Hemogenic Endothelial Progenitors","Myeloid Progenitors","Erythroblasts")] = "Progenitors"
+seu_combined_invivo$major_celltype = major_celltype
+saveRDS(seu_combined_invivo, file = "../Data/invivo_combined.RDS")
+
+seu_query_invivo = seu_combined_invivo[,is.na(seu_combined_invivo$major_celltype)]
+seu_integrated_invivo = seu_combined_invivo[,!is.na(seu_combined_invivo$major_celltype)]
+seu_integrated_invivo <- RunUMAP(seu_integrated_invivo, dims = 1:10, reduction = "pca", return.model = TRUE)
+```
+
+```{r}
+sce_GSE177689 = readRDS("../Data/human_blastoid_GSE177689.RDS")
+sce_GSE156596 = readRDS("../Data/human_blastoid_GSE156596.RDS")
+sce_GSE171820 = readRDS("../Data/human_blastoid_GSE171820.RDS")
+sce_GSE125616 = readRDS("../Data/human_embryoid_GSE125616.RDS")
+sce_GSE150578 = readRDS("../Data/human_blastoid_GSE150578.RDS")
+sce_GSE144897_1 = readRDS("../Data/human_gastruloid_GSE144897_1.RDS")
+sce_GSE144897_2 = readRDS("../Data/human_gastruloid_GSE144897_2.RDS")
+
+seu_GSE177689 <- convert_to_seurat(sce_GSE177689, meta = TRUE)
+seu_GSE177689 <- NormalizeData(seu_GSE177689,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_GSE177689 <- FindVariableFeatures(seu_GSE177689, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_GSE156596 <- convert_to_seurat(sce_GSE156596, meta = TRUE)
+seu_GSE156596 <- NormalizeData(seu_GSE156596,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_GSE156596 <- FindVariableFeatures(seu_GSE156596, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_GSE171820 <- convert_to_seurat(sce_GSE171820, meta = TRUE)
+seu_GSE171820 <- NormalizeData(seu_GSE171820,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_GSE171820 <- FindVariableFeatures(seu_GSE171820, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_GSE125616 <- convert_to_seurat(sce_GSE125616, meta = TRUE)
+seu_GSE125616 <- NormalizeData(seu_GSE125616,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_GSE125616 <- FindVariableFeatures(seu_GSE125616, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_GSE150578 <- convert_to_seurat(sce_GSE150578, meta = TRUE)
+seu_GSE150578 <- NormalizeData(seu_GSE150578,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_GSE150578 <- FindVariableFeatures(seu_GSE150578, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_GSE144897_1 <- convert_to_seurat(sce_GSE144897_1, meta = TRUE)
+seu_GSE144897_1 <- NormalizeData(seu_GSE144897_1,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_GSE144897_1 <- FindVariableFeatures(seu_GSE144897_1, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_GSE144897_2 <- convert_to_seurat(sce_GSE144897_2, meta = TRUE)
+seu_GSE144897_2 <- NormalizeData(seu_GSE144897_2,
+                       normalization.method = "LogNormalize",
+                       scale.factor = 10000)
+seu_GSE144897_2 <- FindVariableFeatures(seu_GSE144897_2, 
+                              selection.method = "vst", 
+                              nfeatures = 1000)
+
+seu_list_invitro = c(seu_GSE177689,seu_GSE156596,seu_GSE171820,seu_GSE125616,seu_GSE150578,seu_GSE144897_1,seu_GSE144897_2)
+
+features_invitro <- SelectI
+ntegrationFeatures(object.list = seu_list_invitro,
+                                      nfeatures = 2000)
+
+seu_list_invitro <- lapply(X = seu_list_invitro , FUN = function(x) {
+    x <- ScaleData(x, features = features_invitro, verbose = FALSE)
+    x <- RunPCA(x, features = features_invitro, verbose = FALSE, npcs = 50)
+    return(x)
+})
+
+seu_anchors_invitro <- FindIntegrationAnchors(object.list = seu_list_invitro, 
+                                      anchor.features = features_invitro, 
+                                      reduction = "rpca",
+                                      dims = 1:30,
+                                      k.anchor = 5) 
+
+seu_combined_invitro <- IntegrateData(anchorset = seu_anchors_invitro, 
+                                      features = features_invitro) 
+
+DefaultAssay(seu_combined_invitro) <- "integrated"
+
+seu_combined_invitro <- ScaleData(seu_combined_invitro, verbose = FALSE)
+seu_combined_invitro <- RunPCA(seu_combined_invitro, npcs = 20, ndims.print = 1:15, verbose = FALSE) 
+seu_combined_invitro <- RunUMAP(seu_combined_invitro, 
+                        reduction = "pca", 
+                        dims = 1:15)
+saveRDS(seu_combined_invitro, file = "../Data/invitro_combined.RDS")
+
+seu_query_invitro = seu_combined_invitro[,is.na(seu_combined_invitro$celltype)]
+seu_integrated_invitro = seu_combined_invitro[,!is.na(seu_combined_invitro$celltype)]
+seu_integrated_invitro <- RunUMAP(seu_integrated_invitro, dims = 1:15, reduction = "pca", return.model = TRUE)
+```
+
+
+
+#V1
+```{r}
+#in vivo
+seu_anchors_invivo_ref_v1 <- FindTransferAnchors(reference = seu_integrated_invivo, query = seu_query_invivo,
+    dims = 1:15, reference.reduction = "pca")
+predictions_invivo_v1 <- TransferData(anchorset = seu_anchors_invivo_ref_v1, refdata = seu_integrated_invivo$major_celltype,
+    dims = 1:15)
+seu_query_invivo_v1 <-seu_query_invivo
+seu_query_invivo_v1 <- AddMetaData(seu_query_invivo_v1, metadata = predictions_invivo_v1)
+
+my_col_invivo <- colorRampPalette(RColorBrewer::brewer.pal(8, "Paired"))
+my_col_invivo <- my_col_invivo(length(unique(seu_integrated_invivo$major_celltype)))
+names(my_col_invivo) <- unique(seu_integrated_invivo$major_celltype)
+
+seu_query_invivo_v1 <- MapQuery(anchorset = seu_anchors_invivo_ref_v1, reference = seu_integrated_invivo, query = seu_query_invivo_v1,
+    refdata = list(celltype = "major_celltype"), reference.reduction = "pca", reduction.model = "umap")
+p1 <- DimPlot(seu_integrated_invivo, reduction = "umap", group.by = "major_celltype", 
+              cols = my_col_invivo, label = TRUE, label.size = 3,
+    repel = TRUE) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invivo_v1, reduction = "ref.umap", group.by = "predicted.celltype", label = TRUE,
+              cols = my_col_invivo,
+    label.size = 3, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+
+p = p1+p2
+p
+p %>% ggsave(filename = "../Figures/in_vivo_original.pdf", width = 10, height = 5)
+```
+
+```{r}
+#sce_integrated_invivo = Seurat::as.SingleCellExperiment(seu_integrated_invivo)
+#major_celltype = sce_integrated_invivo$major_celltype
+#names(major_celltype) = colnames(sce_integrated_invivo)
+ 
+#ridx = sample(1:ncol(sce_integrated_invivo), 5000)
+#cellTypes.reclassify_invivo <- multiAdaSampling(sce_integrated_invivo[,ridx], major_celltype[ridx], reducedDimName = "PCA", 
+#                                          classifier = "svm", percent = 1, L = 10)
+#cellIndex = intersect(rownames(cellTypes.reclassify$prob), colnames(sce_integrated_invivo))
+#idx <- which(cellTypes.reclassify_invivo$final != major_celltype[ridx])
+#probmat = apply(cellTypes.reclassify_invivo$prob, 1, max) > 0.9
+
+#changeCty = idx & probmat
+
+#major_celltype2 = sce_integrated_invivo$major_celltype
+#major_celltype2[idx] = cellTypes.reclassify_invivo$final[idx]
+#names(major_celltype2) = colnames(sce_integrated_invivo)
+#seu_integrated_invivo$major_celltype2 = major_celltype2
+
+
+#marker
+#tmp = rownames(seu_integrated_invivo)
+#featurestoplot = grep("NANOG", tmp, value = TRUE)
+#seu_integrated_invivo <- SetIdent(seu_integrated_invivo, value = "major_celltype2")
+#markers <- FindMarkers(seu_integrated_invivo, ident.1 = "Early blastocyst", min.pct = 0.25)
+#head(markers, n = 5)
+#featurestoplot = rownames(markers)[1]
+#RidgePlot(seu_integrated_invivo, features = featurestoplot, ncol = 2)
+```
+
+```{r}
+#seu_query_invivo_v1 <- MapQuery(anchorset = seu_anchors_invivo_ref_v1, reference = seu_integrated_invivo, query = seu_query_invivo_v1,
+#    refdata = list(celltype = "major_celltype2"), reference.reduction = "pca", reduction.model = "umap")
+#p1 <- DimPlot(seu_integrated_invivo, reduction = "umap", group.by = "major_celltype2", label = TRUE, label.size = 3,
+#    repel = TRUE) + NoLegend() + ggtitle("Reference annotations")
+#p2 <- DimPlot(seu_query_invivo_v1, reduction = "ref.umap", group.by = "predicted.celltype", label = TRUE,
+#    label.size = 3, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+#p1 + p2
+```
+
+
+
+```{r}
+idx_TE = which(seu_integrated_invivo$major_celltype == "Trophectoderm")
+seu_integrated_invivo_subsample = seu_integrated_invivo[,-idx_TE]
+
+sce_integrated_invivo_subsample = Seurat::as.SingleCellExperiment(seu_integrated_invivo_subsample)
+major_celltype_subsample = sce_integrated_invivo_subsample$major_celltype
+names(major_celltype_subsample) = colnames(sce_integrated_invivo_subsample)
+sce_integrated_invivo_subsample$major_celltype_subsample = major_celltype_subsample
+sce_integrated_invivo_subsample = scater::runPCA(sce_integrated_invivo_subsample)
+ 
+#ridx_subsample = sample(1:ncol(sce_integrated_invivo_subsample), 5000)
+
+#library(parallel)
+#cellTypes.reclassify_invivo_subsampleList = mclapply(5:9,  function(i) {
+  
+#  res = multiAdaSampling(sce_integrated_invivo_subsample, major_celltype_subsample, 
+#                                          reducedDimName = "PCA", 
+#                                          classifier = "svm", percent = 1, L = i)
+#  res$L = i
+#  return(res)
+  
+#}, mc.cores = 5)
+#names(cellTypes.reclassify_invivo_subsampleList) = 5:9
+cellTypes.reclassify_invivo_subsample <- multiAdaSampling(sce_integrated_invivo_subsample, major_celltype_subsample, 
+                                          reducedDimName = "PCA", 
+                                          classifier = "svm", percent = 1, L = 10)
+
+idx_subsample <- which(cellTypes.reclassify_invivo_subsample$final != major_celltype_subsample)
+probmat_subsample = apply(cellTypes.reclassify_invivo_subsample$prob, 1, max) > 0.9
+
+#changeCty = idx & probmat
+
+major_celltype2_subsample = sce_integrated_invivo_subsample$major_celltype
+major_celltype2_subsample[idx_subsample] = cellTypes.reclassify_invivo_subsample$final[idx_subsample]
+names(major_celltype2_subsample) = colnames(sce_integrated_invivo_subsample)
+seu_integrated_invivo_subsample$major_celltype2_subsample = major_celltype2_subsample
+```
+
+
+```{r fig.height=3, fig.width=8}
+#subsampling down TE
+#idx_TE = which(seu_integrated_invivo$major_celltype2 == "Trophectoderm")
+#idx_TE2 = sample(idx_TE, 4700)
+#seu_integrated_invivo_subsample = seu_integrated_invivo[,-idx_TE]
+
+seu_integrated_invivo_subsample <- RunPCA(seu_integrated_invivo_subsample, dims = 1:10, return.model = TRUE)
+seu_integrated_invivo_subsample <- RunUMAP(seu_integrated_invivo_subsample, dims = 1:10, reduction = "pca", return.model = TRUE)
+
+seu_anchors_invivo_ref_v1_subsample <- FindTransferAnchors(reference = seu_integrated_invivo_subsample, query = seu_query_invivo,
+    dims = 1:15, reference.reduction = "pca")
+predictions_invivo_v1_subsample <- TransferData(anchorset = seu_anchors_invivo_ref_v1_subsample, refdata = seu_integrated_invivo_subsample$major_celltype2_subsample,
+    dims = 1:15)
+#seu_query_invivo_v1_subsample <-seu_query_invivo
+seu_query_invivo_v1_subsample <- AddMetaData(seu_query_invivo, metadata = predictions_invivo_v1_subsample)
+
+seu_query_invivo_v1_subsample <- MapQuery(anchorset = seu_anchors_invivo_ref_v1_subsample,
+                                          reference = seu_integrated_invivo_subsample, 
+                                          query = seu_query_invivo_v1_subsample,
+                                          refdata = list(celltype = "major_celltype2_subsample"), 
+                                          reference.reduction = "pca", 
+                                          reduction.model = "umap")
+p1 <- DimPlot(seu_integrated_invivo_subsample, reduction = "umap", group.by = "major_celltype2_subsample", cols = my_col_invivo, label = TRUE, label.size = 3,
+    repel = TRUE) +  ggtitle("Reference annotations")
+p1a <- DimPlot(seu_integrated_invivo_subsample, reduction = "umap", group.by = "major_celltype", cols = my_col_invivo, label = TRUE, label.size = 3,
+    repel = TRUE) +  ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invivo_v1_subsample, reduction = "ref.umap", group.by = "predicted.celltype", cols = my_col_invivo, label = TRUE,
+    label.size = 3, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+p1 + p1a
+
+p = p1+p2
+p %>% ggsave(filename = "../Figures/in_vivo_noTE_reclassify.pdf", width = 10, height = 5)
+```
+
+
+```{r}
+#in vitro
+seu_anchors_invitro_ref_v1 <- FindTransferAnchors(reference = seu_integrated_invitro, query = seu_query_invitro,
+    dims = 1:15, reference.reduction = "pca")
+predictions_invitro_v1 <- TransferData(anchorset = seu_anchors_invitro_ref_v1, refdata = seu_integrated_invitro$celltype,
+    dims = 1:15)
+seu_query_invitro_v1 <-seu_query_invitro
+seu_query_invitro_v1 <- AddMetaData(seu_query_invitro_v1, metadata = predictions_invitro_v1)
+
+my_col_invitro <- colorRampPalette(RColorBrewer::brewer.pal(8, "Paired"))
+my_col_invitro <- my_col_invitro(length(unique(seu_integrated_invitro$celltype)))
+names(my_col_invitro) <- unique(seu_integrated_invitro$celltype)
+
+seu_query_invitro_v1 <- MapQuery(anchorset = seu_anchors_invitro_ref_v1, reference = seu_integrated_invitro, query = seu_query_invitro_v1,
+    refdata = list(celltype = "celltype"), reference.reduction = "pca", reduction.model = "umap")
+p1 <- DimPlot(seu_integrated_invitro, reduction = "umap", group.by = "celltype", cols = my_col_invitro, label = TRUE, label.size = 3,
+    repel = TRUE) + #NoLegend() + 
+  ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invitro_v1, reduction = "ref.umap", group.by = "predicted.celltype", cols = my_col_invitro, label = TRUE,
+    label.size = 3, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+
+p=p1+p2
+p %>% ggsave(filename = "../Figures/in_vitro_original.pdf", width = 10, height = 5)
+```
+
+```{r}
+sce_integrated_invitro = Seurat::as.SingleCellExperiment(seu_integrated_invitro)
+celltype_invitro = sce_integrated_invitro$celltype
+names(celltype_invitro) = colnames(sce_integrated_invitro)
+ 
+#ridx = sample(1:ncol(sce_integrated_invitro), 5000)
+cellTypes.reclassify_invitro <- multiAdaSampling(sce_integrated_invitro, celltype_invitro, 
+                                          reducedDimName = "PCA", 
+                                          classifier = "svm", percent = 1, L = 10)
+
+idx2 <- which(cellTypes.reclassify_invitro$final != celltype_invitro)
+probmat2 = apply(cellTypes.reclassify_invitro$prob, 1, max) > 0.9
+
+#changeCty = idx & probmat
+
+celltype_invitro2 = sce_integrated_invitro$celltype
+celltype_invitro2[idx2] = cellTypes.reclassify_invitro$final[idx2]
+names(celltype_invitro2) = colnames(sce_integrated_invitro)
+seu_integrated_invitro$celltype_invitro2 = celltype_invitro2
+
+
+#marker
+tmp2 = rownames(seu_integrated_invitro)
+featurestoplot2 = grep("NANOG", tmp2, value = TRUE)
+seu_integrated_invitro <- SetIdent(seu_integrated_invitro, value = "celltype_invitro2")
+markers2 <- FindMarkers(seu_integrated_invitro, ident.1 = "Polar Trophectoderm", min.pct = 0.25)
+head(markers2, n = 5)
+featurestoplot = rownames(markers2)[1]
+p = RidgePlot(seu_integrated_invitro, features = featurestoplot2, ncol = 2)
+
+```
+
+```{r}
+seu_query_invitro_v1 <- MapQuery(anchorset = seu_anchors_invitro_ref_v1, reference = seu_integrated_invitro, query = seu_query_invitro_v1,
+    refdata = list(celltype = "celltype_invitro2"), reference.reduction = "pca", reduction.model = "umap")
+p1 <- DimPlot(seu_integrated_invitro, reduction = "umap", group.by = "celltype_invitro2", cols = my_col_invitro, label = TRUE, label.size = 3,
+    repel = TRUE) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invitro_v1, reduction = "ref.umap", group.by = "predicted.celltype", cols = my_col_invitro, label = TRUE,
+    label.size = 3, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+
+p=p1+p2
+p %>% ggsave(filename = "../Figures/in_vitro_reclassify.pdf", width = 10, height = 5)
+```
+
+#V2
+```{r}
+# in vivo reference query in vitro
+seu_anchors_invivo_ref_v2 <- FindTransferAnchors(reference = seu_integrated_invivo, 
+                                                 query = seu_query_invitro,
+    dims = 1:15, reference.reduction = "pca")
+predictions_invitro_v2 <- TransferData(anchorset = seu_anchors_invivo_ref_v2, 
+                                       refdata = seu_integrated_invivo$celltype,
+    dims = 1:15)
+seu_query_invitro_v2 <-seu_query_invitro
+seu_query_invitro_v2 <- AddMetaData(seu_query_invitro_v2, metadata = predictions_invitro_v2)
+
+
+seu_query_invitro_v2 <- MapQuery(anchorset = seu_anchors_invivo_ref_v2, reference = seu_integrated_invivo, query = seu_query_invitro_v2,
+    refdata = list(celltype = "celltype"), reference.reduction = "pca", reduction.model = "umap")
+p1 <- DimPlot(seu_integrated_invivo, reduction = "umap", group.by = "celltype", label = TRUE, label.size = 3,
+    repel = TRUE) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invitro_v2, reduction = "ref.umap", group.by = "predicted.celltype", label = TRUE,
+    label.size = 3, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+
+
+```
+
+```{r}
+# in vitro reference query in vivo
+seu_anchors_invitro_ref_v2 <- FindTransferAnchors(reference = seu_integrated_invitro, query = seu_query_invivo,
+    dims = 1:15, reference.reduction = "pca")
+predictions_invivo_v2 <- TransferData(anchorset = seu_anchors_invitro_ref_v2, 
+                                      refdata = seu_integrated_invitro$celltype,
+    dims = 1:15)
+seu_query_invivo_v2 <-seu_query_invivo
+seu_query_invivo_v2 <- AddMetaData(seu_query_invivo_v2, metadata = predictions_invivo_v2)
+
+
+seu_query_invivo_v2 <- MapQuery(anchorset = seu_anchors_invitro_ref_v2, reference = seu_integrated_invitro, query = seu_query_invivo_v2,
+    refdata = list(celltype = "celltype"), reference.reduction = "pca", reduction.model = "umap")
+p1 <- DimPlot(seu_integrated_invitro, reduction = "umap", group.by = "celltype", label = TRUE, label.size = 3,
+    repel = TRUE) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invivo_v2, reduction = "ref.umap", group.by = "predicted.celltype", label = TRUE,
+    label.size = 3, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+#all integrate
+```{r}
+seu_list_all = c(seu_EMTAB3929,seu_data2,seu_data3,seu_EMTAB9388,seu_GSE177689,seu_GSE156596,seu_GSE171820,seu_GSE125616,seu_GSE150578,seu_GSE144897_1,seu_GSE144897_2)
+
+features_all <- SelectIntegrationFeatures(object.list = seu_list_all,
+                                      nfeatures = 2000)
+
+seu_list_all <- lapply(X = seu_list_all , FUN = function(x) {
+    x <- ScaleData(x, features = features_all, verbose = FALSE)
+    x <- RunPCA(x, features = features_all, verbose = FALSE, npcs = 50)
+    return(x)
+})
+
+seu_anchors_all <- FindIntegrationAnchors(object.list = seu_list_all, 
+                                      anchor.features = features_all, 
+                                      reduction = "cca",
+                                      dims = 1:15,
+                                      k.anchor = 5) 
+
+seu_combined_all <- IntegrateData(anchorset = seu_anchors_all)
+
+DefaultAssay(seu_combined_all) <- "integrated"
+
+seu_combined_all <- ScaleData(seu_combined_all, verbose = FALSE)
+seu_combined_all <- RunPCA(seu_combined_all, npcs = 15, ndims.print = 1:10, verbose = FALSE) 
+seu_combined_all <- RunUMAP(seu_combined_all, 
+                        reduction = "pca", 
+                        dims = 1:10)
+```
+
+```{r fig.height=4, fig.width=6}
+emb = "umap"
+p1 <- DimPlot(seu_combined_all, reduction = emb, 
+              group.by = "celltype", label = TRUE, repel = TRUE)
+p2 <- DimPlot(seu_combined_all, reduction = emb, 
+              group.by = "dataset")
+p3 <- FeaturePlot(seu_combined_all, reduction = emb, 
+              features = "NANOG",
+              #min.cutoff = 1, max.cutoff = 3,
+    repel = TRUE)
+p1
+p2
+p3
+
+p1
+```
+

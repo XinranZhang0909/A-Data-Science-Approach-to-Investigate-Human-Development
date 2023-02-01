@@ -1,0 +1,104 @@
+---
+title: "GSE150578"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+  library(dplyr)
+})
+```
+
+```{r}
+count_lw60 <- read.csv("../../Data/GSE150578/GSM4979149_matrix_readcount_lw60.csv")
+count_lw60
+
+count_lw61 <- read.csv("../../Data/GSE150578/GSM4979150_matrix_readcount_lw61.csv")
+count_lw61
+
+rownames(count_lw60) = count_lw60$gene
+rownames(count_lw61) = count_lw61$gene
+
+count_lw60 = count_lw60[,-1]
+count_lw61 = count_lw61[,-1]
+
+geneidx = intersect(rownames(count_lw60), rownames(count_lw61))
+
+count = cbind(count_lw60[geneidx,], count_lw61[geneidx,])
+
+cellNames=rownames(count)
+tmp = strsplit(cellNames, "[_]")
+
+geneID = sapply(tmp, "[[", 2)
+sum(duplicated(geneID))
+count = count[!duplicated(geneID),]
+geneID = sapply(strsplit(rownames(count), "[_]"),"[[", 2)
+row.names(count) = geneID
+
+embedding = read.csv("../../Data/GSE150578/embedding.csv")
+rownames(embedding) = embedding$cell
+cellindex = intersect(colnames(count), embedding$cell)
+
+
+embedding = embedding[cellindex,]
+
+sum(rownames(embedding) == colnames(count))
+```
+
+```{r}
+embedding
+meta = data.frame(
+  cellname = embedding$cell,
+  timepoint = rep("D9", ncol(count)),
+  celltype = NA,
+  treatment = NA,
+  batch = NA,
+  batch = embedding$batch,
+  type = rep("blastoid", ncol(count)),
+  dataset = rep("GSE150578", ncol(count))
+)
+```
+
+
+```{r}
+sce = SingleCellExperiment(assays = list(counts = count),
+                           colData = meta)
+#reducedDim(sce, "UMAP") = colData(sce)[, c("x_umap", "y_umap")]
+
+#scater::plotUMAP(sce, colour_by = 'louvain')
+```
+
+```{r}
+totalUMI <- colSums(counts(sce))
+#mitochondrial
+propMito <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce) > 0)
+propZero <- colSums(counts(sce) == 0)/nrow(sce)
+
+sce$nUMI <- totalUMI
+sce$nGene <- totalGene
+sce$propMT <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+sce$propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+
+dim(sce)
+propZeroGene <- rowSums(counts(sce) == 0)/ncol(sce)
+sce = sce[propZeroGene < 1, propZero < 1]
+
+#transforming the data
+sce = scater::logNormCounts(sce)
+sce = scater::runPCA(sce, scale = TRUE)
+sce = scater::runUMAP(sce, ncomponents = 5)
+plotUMAP(sce, colour_by = "timepoint")
+plotUMAP(sce, colour_by = "nGene")
+
+saveRDS(sce, file = "../Data/human_blastoid_GSE150578.RDS")
+```

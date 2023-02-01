@@ -1,0 +1,61 @@
+---
+title: "GSE157329"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+  library(dplyr)
+})
+```
+
+```{r}
+count <- Matrix::readMM("../../Data/GSE157329/raw_counts.mtx")
+
+cell <- read.delim("../../Data/GSE157329/cell_annotate.txt")
+gene <- read.delim("../../Data/GSE157329/gene_annotate.txt")
+
+idx = duplicated(gene$gene_short_name)
+count = count[!idx,]
+
+colnames(count) = cell$barcode
+rownames(count) = gene$gene_short_name[!idx]
+
+sce = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count),
+                                                 colData = cell)
+sce = sce[, !is.na(sce$embryoday)]
+```
+
+# QC for cells
+```{r}
+totalUMI <- colSums(counts(sce))
+#mitochondrial
+propMito <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce) > 0)
+propZero <- colSums(counts(sce) == 0)/nrow(sce)
+
+sce$nUMI <- totalUMI
+sce$nGene <- totalGene
+sce$propMT <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+sce$propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+
+propZeroGene <- rowSums(counts(sce) == 0)/ncol(sce)
+sce = sce[propZeroGene < 1, propZero < 1]
+sce = scater::logNormCounts(sce)
+sce = scater::runPCA(sce, scale = TRUE)
+sce = scater::runUMAP(sce, ncomponents = 5)
+plotUMAP(sce, colour_by = "embryoday")
+
+saveRDS(sce, file = "../Data/human_embryo_2.RDS")
+```
+
+

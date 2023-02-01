@@ -1,0 +1,561 @@
+---
+title: "Integration of in vivo data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(DelayedMatrixStats)
+  library(Seurat)
+  library(ggplot2)
+  library(ggthemes)
+  library(scater)
+  library(scReClassify)
+  library(RColorBrewer)
+  library(dplyr)
+})
+```
+
+# Load the four in vivo datasets
+```{r}
+## datasets with annotation
+#sce_EMTAB3929 = readRDS("../EmbryoEikonDev/Data/Human_embryo_E-MTAB-3929.RDS") # Petropoulos et al. 
+sce_2 = readRDS("../EmbryoEikonDev/Data/human_embryo_2.RDS") # Meistermann et al. Petropoulous et al., and Yan et al.
+meta = read.csv("/Users/hani/Dropbox (Sydney Uni)/Hani/Supervision/Xinran/Data/2/Human_Sample_Info.csv")
+rownames(meta) = meta$Name
+meta = meta[colnames(sce_2),]
+sce_2$dataset = meta$Dataset
+sce_2$batch_embryo = meta$Embryo
+sce_petropoulous = sce_2[,sce_2$dataset == "Petropoulos 2016"]
+sce_meistermann = sce_2[,sce_2$dataset == "Meistermann 2021"]
+
+sce_3 = readRDS("../EmbryoEikonDev/Data/human_embryo_3.RDS") # Mole et al.
+sce_3$dataset[sce_3$batch_embryo %in% paste0("embryo",c(12:15))] = "3a"
+sce_3$dataset[!sce_3$batch_embryo %in% paste0("embryo",c(12:15))] = "3b"
+sce_3a = sce_3[,sce_3$dataset == "3a"]
+sce_3b = sce_3[,sce_3$dataset == "3b"]
+sce_GSE109555_TrioSeq = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE109555_TrioSeq.RDS") # Zhou et al.
+sce_GSE109555_TrioSeq$dataset = paste0(sce_GSE109555_TrioSeq$dataset, "-trioseq")
+sce_GSE109555_AllEmbryo = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE109555_AllEmbryo.RDS") 
+sce_GSE109555_AllEmbryo$dataset = paste0(sce_GSE109555_AllEmbryo$dataset, "-allembyro")
+
+## datasets without annotations
+sce_GSE136447 = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE136447.RDS") # Xiang et al. 
+
+## filter post-implantation gastrulating embryos
+#sce_EMTAB9388 = readRDS("../EmbryoEikonDev/Data/human_embryo_E-MTAB-9388.RDS") #remove late E16
+## filter because there are only 30 cells
+#sce_GSE66507 = readRDS("../EmbryoEikonDev/Data/human_embryo_GSE66507.RDS") # Blakeley et al. 
+
+## read in doublet results
+doublets <- read.csv("../EmbryoEikonDev/Data/invivo_doublets.csv")
+rownames(doublets) <- doublets$cell
+```
+
+```{r}
+## process data
+sce_list_invivo = list(sce_petropoulous,
+                       sce_meistermann,
+                       sce_3a,
+                       sce_3b,
+                       sce_GSE136447,
+                       sce_GSE109555_TrioSeq,
+                       sce_GSE109555_AllEmbryo)
+names(sce_list_invivo) = c("Petropoulos", "Meistermann", "MoleA", "MoleB", "Xiang", "Zhou1", "Zhou2")
+
+sce_list_invivo <- lapply(sce_list_invivo, function(sce) {
+  
+  if(any(toupper(names(assays(sce))) == "RPKM")) {
+    names(assays(sce_list_invivo[[1]])) <- toupper(names(assays(sce)))
+    counts(sce) <- assay(sce, "RPKM")
+    assay(sce, "RPKM") <- NULL
+    sce <- scater::logNormCounts(sce)
+  } 
+  return(sce)
+  
+})
+sapply(sce_list_invivo, function(x) table(x$celltype))
+sapply(sce_list_invivo, function(x) table(x$timepoint))
+
+convert_to_seurat <- function(sce, meta = TRUE, rpkm = FALSE, ...) {
+  drops <- rownames(sce)
+  if (meta) 
+    meta.data <- colData(sce)
+  else meta.data <- NULL
+  
+  if(any(toupper(names(assays(sce))) == "RPKM")) {
+    names(assays(sce_list_invivo[[1]])) <- toupper(names(assays(sce)))
+    counts <- assay(sce, "RPKM")[drops, ,drop = FALSE]
+  } else {
+    counts <- counts(sce)[drops, ,drop = FALSE]
+  }
+  seur <- Seurat::CreateSeuratObject(counts = counts, meta.data = as.data.frame(meta.data)) 
+  return(seur)
+}
+
+processData <- function(sce, 
+                        normalization.method = "LogNormalize",
+                        scale.fator = 10000,
+                        meta = TRUE) {
+  seu <- convert_to_seurat(sce, meta = meta)
+  seu <- NormalizeData(seu,normalization.method = normalization.method, scale.factor = scale.fator)
+  return(seu)
+}
+
+seu_list_invivo <- lapply(sce_list_invivo, processData)
+features_invivo <- SelectIntegrationFeatures(object.list = seu_list_invivo, nfeatures = 2000)
+geneIdx = Reduce(intersect, lapply(seu_list_invivo, rownames))
+length(geneIdx)
+
+counter <- 0
+seu_list_invivo <- lapply(X = seu_list_invivo , FUN = function(x) {
+  counter <<- counter + 1
+  print(counter)
+  x$cellID <- colnames(x)
+  
+  tmpID = paste0(x$dataset, "_", x$cellID)
+  print(table(tmpID %in% doublets$cell))
+  ### filter for doublets
+  x$doublet = doublets[tmpID, "doublet"]
+  print(sum(is.na(x$doublet)))
+  x <- x[,x$doublet == "Singlet"]
+  
+  ### filter for cell types with fewer than 15 cells (no datasets have fewer than 15 cells in a cell type)
+  if (!any(is.na(x$celltype))) {
+    x <- x[, x$celltype %in% names(table(x$celltype))[table(x$celltype) > 15]]
+  }
+  
+  x <- x[geneIdx, ]
+  x <- ScaleData(x, features = features_invivo, verbose = FALSE)
+  x <- RunPCA(x, features = features_invivo, verbose = FALSE, npcs = 50)
+  return(x)
+})
+
+idx_query = sapply(seu_list_invivo, function(x) sum(is.na(x$celltype)) != 0)
+sapply(seu_list_invivo, dim)
+sapply(seu_list_invivo, function(x) unique(x$dataset))
+```
+
+```{r}
+seu_anchors_invivo <- FindIntegrationAnchors(object.list = seu_list_invivo[!idx_query], 
+                                             anchor.features = features_invivo, 
+                                             reduction = "rpca",
+                                             dims = 1:50,
+                                             k.anchor = 5)
+seu_combined_invivo <- IntegrateData(anchorset = seu_anchors_invivo)
+DefaultAssay(seu_combined_invivo) <- "integrated"
+seu_combined_invivo <- ScaleData(seu_combined_invivo, verbose = FALSE)
+
+major_celltype = seu_combined_invivo$celltype
+major_celltype[major_celltype %in% c("8.TE.NR2F2-", "9.TE.NR2F2+", "5.Early trophectoderm", "TE", "trophectoderm-mural", "trophectoderm-NA", "trophectoderm-polar")] = "Trophectoderm"
+major_celltype[major_celltype %in% c("6.Epiblast", "Epi", "epiblast-NA")] = "Epiblast"
+major_celltype[major_celltype %in% c("YS Mesoderm", "ExE Mesoderm")] = "ExE Mesoderm" 
+major_celltype[major_celltype %in% c("Advanced Mesoderm", "Axial Mesoderm", "Emergent Mesoderm", "Nascent Mesoderm")] = "Mesoderm"
+major_celltype[major_celltype %in% c("YS Endoderm")] = "ExE Endoderm" 
+major_celltype[major_celltype %in% c("7.Primitive endoderm","PE", "Hypo", "primitive endoderm-NA")] = "Primitive Endoderm"
+major_celltype[major_celltype %in% c("DE(NP)", "DE(P)")] = "Definitive Endoderm"
+major_celltype[major_celltype %in% c("1.Pre-morula")] = "Pre-morula"
+major_celltype[major_celltype %in% c("2.Morula")] = "Morula"
+major_celltype[major_celltype %in% c("3.Early blastocyst")] = "Early blastocyst"
+major_celltype[major_celltype %in% c("4.Inner cell mass")] = "Inner cell mass"
+major_celltype[major_celltype %in% c("Hemogenic Endothelial Progenitors", "Hemogenic Endothelium")] = "Blood related"
+major_celltype[major_celltype %in% c("Myeloid Progenitors", "Erythro-Myeloid Progenitors", "Blood Progenitors", "Erythroblasts")] = "Blood progenitors"
+seu_combined_invivo$major_celltype = major_celltype
+
+seu_integrated_invivo = seu_combined_invivo[,!is.na(seu_combined_invivo$major_celltype)]
+seu_integrated_invivo$timepoint[seu_integrated_invivo$timepoint == "E4_late"] = "E4"
+seu_integrated_invivo$timepoint[seu_integrated_invivo$timepoint == "E5_early"] = "E5"
+seu_integrated_invivo$timepoint <- gsub("E", "", seu_integrated_invivo$timepoint)
+seu_integrated_invivo$timepoint = factor(seu_integrated_invivo$timepoint, levels = sort(as.numeric(as.character(unique(seu_integrated_invivo$timepoint)))))
+seu_integrated_invivo <- RunPCA(seu_integrated_invivo, dims = 1:50, return.model = TRUE) #50,50
+seu_integrated_invivo <- RunUMAP(seu_integrated_invivo, dims = 1:50, reduction = "pca", return.model = TRUE)
+
+cty_cols = RColorBrewer::brewer.pal(11, "Spectral")
+cty_cols = colorRampPalette(cty_cols)(length(unique(seu_integrated_invivo$major_celltype)))
+names(cty_cols) = unique(seu_integrated_invivo$major_celltype)
+p1 = DimPlot(seu_integrated_invivo, reduction = "umap", group.by = "major_celltype", cols=cty_cols)
+p2 = DimPlot(seu_integrated_invivo, reduction = "umap", group.by = "timepoint")
+p3 = DimPlot(seu_integrated_invivo, reduction = "umap", group.by = "dataset")
+p1+p2+p3
+```
+
+## Run scReClassify
+```{r}
+set.seed(1)
+sce_test = Seurat::as.SingleCellExperiment(seu_integrated_invivo)
+
+scReClassify_labels = list()
+
+for (i in 1:10) {
+  
+  print(i)
+  if (i == 1) {
+    major_celltype = sce_test$major_celltype
+  } else {
+    major_celltype = scReClassify_labels[[i-1]]
+  }
+  
+  names(major_celltype) = colnames(sce_test)
+  
+  cellTypes.reclassify_invivo_svm <- multiAdaSampling(sce_test, major_celltype, reducedDimName = "PCA", 
+                                                      classifier = "svm", percent = 1, L = 10, balance = FALSE)
+  idx_svm <- cellTypes.reclassify_invivo_svm$final != major_celltype
+  probmat_svm = apply(cellTypes.reclassify_invivo_svm$prob, 1, max)/10 > 0.8
+  
+  idx  <- idx_svm & probmat_svm
+  
+  if (i == 1) {
+    major_celltype2 = sce_test$major_celltype
+  } else {
+    major_celltype2 = scReClassify_labels[[i-1]]
+  }
+  major_celltype2[idx] = cellTypes.reclassify_invivo_svm$final[idx]
+  names(major_celltype2) = colnames(sce_test)
+  scReClassify_labels[[i]] = major_celltype2
+  
+  print(table(idx))
+  if (sum(idx)/length(idx) * 100 < 1) {
+    stop()
+  }
+  
+}
+```
+
+```{r}
+cty_cols = RColorBrewer::brewer.pal(12, "Paired")
+cty_cols = colorRampPalette(cty_cols)(length(unique(seu_integrated_invivo$major_celltype)))
+names(cty_cols) = unique(seu_integrated_invivo$major_celltype)
+
+seu_integrated_invivo$major_celltype_test = scReClassify_labels[[length(scReClassify_labels)]]
+
+p1 = DimPlot(seu_integrated_invivo, reduction = "umap", group.by = "major_celltype", cols = cty_cols) + NoLegend()
+p2 = DimPlot(seu_integrated_invivo, reduction = "umap", group.by = "major_celltype_test", cols = cty_cols) + NoLegend()
+p3 = DimPlot(seu_integrated_invivo, reduction = "umap", group.by = "timepoint") + NoLegend()
+p4 = DimPlot(seu_integrated_invivo, reduction = "umap", group.by = "dataset") + NoLegend()
+p1 + p2 + p3 + p4
+
+### CHOOSE FINAL
+seu_integrated_invivo$major_celltype_final = scReClassify_labels[[length(scReClassify_labels)]]
+seu_integrated_invivo$major_celltype_test = NULL
+```
+
+```{r}
+cellTypes.reclassify <- cellTypes.reclassify_invivo_svm$prob
+maxprob = apply(cellTypes.reclassify, 1, max)/10
+dftoplot = as.data.frame(cbind(maxprob,major_celltype))
+dftoplot$class = dftoplot$maxprob
+dftoplot$class[dftoplot$maxprob <= 0.5] = "low"
+dftoplot$class[dftoplot$maxprob <= 0.75 & dftoplot$maxprob > 0.5] = "intermediate"
+dftoplot$class[dftoplot$maxprob <= 0.9 & dftoplot$maxprob > 0.75] = "high"
+dftoplot$class[dftoplot$maxprob > 0.9] = "very high"
+
+my_col = RColorBrewer::brewer.pal(12, "Paired")
+my_colors = colorRampPalette(my_col)(length(unique(major_celltype)))
+dftoplot$class <- factor(dftoplot$class, levels = c("very high", "high", "intermediate", "low"))
+
+gBar <- dftoplot %>%
+  ggplot(aes(y =  major_celltype, fill = factor(class))) +
+  geom_bar(position="fill") + ggtitle("svm") + 
+  scale_fill_manual(values = my_colors) +
+  theme_linedraw()
+gBar
+```
+
+```{r}
+seu_query_invivo_list = seu_list_invivo[idx_query]
+
+seu_query_invivo_list = lapply(seu_query_invivo_list , function(x) {
+  x<- FindVariableFeatures(x, features = 2000)
+  x<- RunPCA(x, dims = 1:30, return.model = TRUE)
+  x<- RunUMAP(x, dims = 1:30, reduction = "pca", return.model = TRUE)
+  return(x)
+})
+
+DimPlot(seu_query_invivo_list[[1]], reduction = "umap")
+DimPlot(seu_query_invivo_list[[2]], reduction = "umap")
+DimPlot(seu_query_invivo_list[[3]], reduction = "umap")
+```
+
+## Transfer labels for query data
+```{r fig.height=5, fig.width=10}
+# transfer labels to dataset without labels
+seu_integrated_invivo$major_celltype_final2 = paste0("E", seu_integrated_invivo$timepoint, "_", seu_integrated_invivo$major_celltype_final)
+seu_anchors_invivo_ref_v1 <- FindTransferAnchors(reference = seu_integrated_invivo, 
+                                                 query = seu_query_invivo_list[[1]],
+                                                 dims = 1:50, reference.reduction = "pca")
+predictions <- TransferData(anchorset = seu_anchors_invivo_ref_v1, 
+                            refdata = seu_integrated_invivo$major_celltype_final2,
+                            dims = 1:30)
+seu_query_invivo_list[[1]] <- AddMetaData(seu_query_invivo_list[[1]], metadata = predictions)
+
+seu_query_invivo1 <- MapQuery(anchorset = seu_anchors_invivo_ref_v1, 
+                              reference = seu_integrated_invivo, 
+                              query = seu_query_invivo_list[[1]],
+                              refdata = list(celltype = "major_celltype_final2"), 
+                              reference.reduction = "pca", 
+                              reduction.model = "umap")
+
+cty_cols = RColorBrewer::brewer.pal(12, "Paired")
+cty_cols = colorRampPalette(cty_cols)(length(unique(seu_integrated_invivo$major_celltype_final2)))
+names(cty_cols) = unique(seu_integrated_invivo$major_celltype_final2)
+
+p1 <- DimPlot(seu_integrated_invivo,
+              reduction = "umap",
+              group.by = "major_celltype_final2", 
+              label = TRUE, 
+              label.size = 6,
+              cols = cty_cols) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invivo1, reduction = "ref.umap", group.by = "predicted.id", label = F, cols = cty_cols,
+              label.size = 6, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+```{r fig.height=5, fig.width=10}
+# transfer labels to dataset without labels
+seu_anchors_invivo_ref_v1 <- FindTransferAnchors(reference = seu_integrated_invivo, 
+                                                 query = seu_query_invivo_list[[2]],
+                                                 dims = 1:50, reference.reduction = "pca")
+predictions <- TransferData(anchorset = seu_anchors_invivo_ref_v1, 
+                            refdata = seu_integrated_invivo$major_celltype_final2,
+                            dims = 1:30)
+seu_query_invivo_list[[2]] <- AddMetaData(seu_query_invivo_list[[2]], metadata = predictions)
+
+seu_query_invivo2 <- MapQuery(anchorset = seu_anchors_invivo_ref_v1, 
+                              reference = seu_integrated_invivo, 
+                              query = seu_query_invivo_list[[2]],
+                              refdata = list(celltype = "major_celltype_final2"), 
+                              reference.reduction = "pca", 
+                              reduction.model = "umap")
+
+cty_cols = RColorBrewer::brewer.pal(12, "Paired")
+cty_cols = colorRampPalette(cty_cols)(length(unique(seu_integrated_invivo$major_celltype_final2)))
+names(cty_cols) = unique(seu_integrated_invivo$major_celltype_final2)
+
+p1 <- DimPlot(seu_integrated_invivo,
+              reduction = "umap",
+              group.by = "major_celltype_final2", 
+              label = TRUE, 
+              label.size = 6,
+              cols = cty_cols) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invivo2, reduction = "ref.umap", group.by = "predicted.id", label = F, cols = cty_cols,
+              label.size = 6, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+```{r fig.height=5, fig.width=10}
+# transfer labels to dataset without labels
+seu_anchors_invivo_ref_v1 <- FindTransferAnchors(reference = seu_integrated_invivo, 
+                                                 query = seu_query_invivo_list[[3]],
+                                                 dims = 1:50, reference.reduction = "pca")
+predictions <- TransferData(anchorset = seu_anchors_invivo_ref_v1, 
+                            refdata = seu_integrated_invivo$major_celltype_final2,
+                            dims = 1:30)
+seu_query_invivo_list[[3]] <- AddMetaData(seu_query_invivo_list[[3]], metadata = predictions)
+
+seu_query_invivo3 <- MapQuery(anchorset = seu_anchors_invivo_ref_v1, 
+                              reference = seu_integrated_invivo, 
+                              query = seu_query_invivo_list[[3]],
+                              refdata = list(celltype = "major_celltype_final2"), 
+                              reference.reduction = "pca", 
+                              reduction.model = "umap")
+
+cty_cols = RColorBrewer::brewer.pal(12, "Paired")
+cty_cols = colorRampPalette(cty_cols)(length(unique(seu_integrated_invivo$major_celltype_final2)))
+names(cty_cols) = unique(seu_integrated_invivo$major_celltype_final2)
+
+p1 <- DimPlot(seu_integrated_invivo,
+              reduction = "umap",
+              group.by = "major_celltype_final2", 
+              label = TRUE, 
+              label.size = 6,
+              cols = cty_cols) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invivo3, reduction = "ref.umap", group.by = "predicted.id", label = F, cols = cty_cols,
+              label.size = 6, repel = TRUE) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+```{r}
+seu_query_invivo1$major_celltype_final2 <- seu_query_invivo_list[[1]]$predicted.id
+seu_query_invivo1@meta.data <- seu_query_invivo1@meta.data[, !grepl("predict", colnames(seu_query_invivo1@meta.data))]
+
+seu_query_invivo2$major_celltype_final2 <- seu_query_invivo_list[[2]]$predicted.id
+seu_query_invivo2@meta.data <- seu_query_invivo2@meta.data[, !grepl("predict", colnames(seu_query_invivo2@meta.data))]
+
+seu_query_invivo3$major_celltype_final2 <- seu_query_invivo_list[[3]]$predicted.id
+seu_query_invivo3@meta.data <- seu_query_invivo3@meta.data[, !grepl("predict", colnames(seu_query_invivo3@meta.data))]
+
+final_labels <- c(seu_integrated_invivo$major_celltype_final2,
+                  seu_query_invivo1$major_celltype_final2,
+                  seu_query_invivo2$major_celltype_final2,
+                  seu_query_invivo3$major_celltype_final2)
+names(final_labels) <- c(seu_integrated_invivo$cellID,
+                         seu_query_invivo1$cellID,
+                         seu_query_invivo2$cellID,
+                         seu_query_invivo3$cellID)
+#names(final_labels) = gsub("Tri_hv_", "", names(final_labels))
+
+all_cells = c(colnames(seu_integrated_invivo), 
+              colnames(seu_query_invivo1), 
+              colnames(seu_query_invivo2), 
+              colnames(seu_query_invivo3))
+names(all_cells) <- names(final_labels)
+
+idx_length = sapply(strsplit(colnames(seu_combined_invivo), "_"), length)
+table(idx_length)
+unique(paste0(sapply(strsplit(colnames(seu_combined_invivo), "_"), function(x) x[[length(x)]]), "_", seu_combined_invivo$dataset))
+
+seu_list_invivo2 <- lapply(seu_list_invivo, function(x) {
+  
+  i = NULL
+  if (unique(x$dataset) == "E-MTAB-3929" & !any(is.na(x$celltype))) {
+    i = 1
+  } else if (unique(x$dataset) == "2") {
+    i = 2
+  } else if (unique(x$dataset) == "3a") {
+    i = 3
+  } else if (unique(x$dataset) == "3b") {
+    i = 4
+  } else if (unique(x$dataset) == "GSE109555-trioseq" & !any(is.na(x$celltype))) {
+    i = 5
+  }
+  
+  if (is.null(i)) {
+    
+    cells <- x$cellID
+    print(table(cells %in% all_cells))
+    x <- x[, cells %in% all_cells]
+    cells <- x$cellID
+    final_labels_tmp <- final_labels[cells]
+    
+  } else {
+    
+    cells <- paste0(x$cellID, "_", i)
+    print(table(cells %in% all_cells))
+    x <- x[, cells %in% all_cells]
+    cells <- paste0(x$cellID, "_", i)
+    
+    final_labels_tmp <- final_labels
+    names(final_labels_tmp) <- paste0(names(final_labels_tmp), "_", i)
+    final_labels_tmp <- final_labels_tmp[cells]
+    
+  }
+  
+  
+  names(final_labels_tmp) <- NULL
+  x@meta.data$major_celltype_final2 <- final_labels_tmp
+  return(x)
+  
+})
+
+anchors <- FindIntegrationAnchors(object.list = seu_list_invivo2, 
+                                  anchor.features = features_invivo, 
+                                  reduction = "rpca",
+                                  dims = 1:50, #1:15
+                                  k.anchor = 5) #5
+seu_invivo <- IntegrateData(anchorset = anchors)
+DefaultAssay(seu_invivo) <- "integrated"
+seu_invivo  <- ScaleData(seu_invivo,  verbose = FALSE)
+seu_invivo <- RunPCA(seu_invivo, npcs = 50, ndims.print = 1:10, verbose = FALSE) 
+seu_invivo <- RunUMAP(seu_invivo, 
+                      reduction = "pca", 
+                      dims = 1:50)
+
+seu_invivo$major_celltype_final <- sapply(strsplit(seu_invivo$major_celltype_final2, "_"), "[[", 2)
+seu_invivo$timepoint2 <- sapply(strsplit(seu_invivo$major_celltype_final2, "_"), "[[", 1)
+seu_invivo$timepoint2 <- as.numeric(gsub("E", "", as.character(seu_invivo$timepoint2)))
+
+cty_cols = RColorBrewer::brewer.pal(12, "Paired")
+cty_cols = colorRampPalette(cty_cols)(length(unique(seu_invivo$major_celltype_final)))
+names(cty_cols) = unique(seu_invivo$major_celltype_final)
+
+p1 = DimPlot(seu_invivo, reduction = "umap", group.by = "major_celltype_final", label = FALSE, cols = cty_cols,
+             label.size = 6, repel = TRUE) 
+p2 = DimPlot(seu_invivo, reduction = "umap", group.by = "dataset", label = TRUE,
+             label.size = 6, repel = TRUE) 
+p3 = DimPlot(seu_invivo, reduction = "umap", group.by = "timepoint2", label = TRUE,
+             label.size = 6, repel = TRUE) 
+
+p1 + p2 + p3
+
+# df = data.frame(dim1= Embeddings(seu_invivo, reduction = "umap")[, 1], 
+#                 dim2= Embeddings(seu_invivo, reduction = "umap")[, 2], 
+#                 cty= seu_invivo$major_celltype_final,
+#                 batch= seu_invivo$dataset,
+#                 time = seu_invivo$timepoint)
+# df = df[sample(1:nrow(df), nrow(df)),]
+# ggplot(df, aes(dim1, dim2, col = as.factor(cty))) + geom_point() + facet_wrap(~cty)
+# ggplot(df, aes(dim1, dim2, col = as.factor(batch))) + geom_point() + facet_wrap(~cty)
+# ggplot(df, aes(dim1, dim2, col = as.factor(time))) + geom_point() + facet_wrap(~cty)
+# 
+# table(seu_invivo$major_celltype_final)
+```
+
+```{r}
+set.seed(1)
+sce_test = Seurat::as.SingleCellExperiment(seu_invivo)
+scReClassify_combined_labels = list()
+
+for (i in 1:10) {
+  
+  print(i)
+  if (i == 1) {
+    major_celltype = sce_test$major_celltype_final
+  } else {
+    major_celltype = scReClassify_combined_labels[[i-1]]
+  }
+  
+  names(major_celltype) = colnames(sce_test)
+  
+  cellTypes.reclassify_invivo_svm <- multiAdaSampling(sce_test, major_celltype, reducedDimName = "PCA", 
+                                                      classifier = "svm", percent = 1, L = 10, balance = FALSE)
+  idx_svm <- cellTypes.reclassify_invivo_svm$final != major_celltype
+  probmat_svm = apply(cellTypes.reclassify_invivo_svm$prob, 1, max)/10 > 0.8
+  
+  idx  <- idx_svm & probmat_svm
+  
+  if (i == 1) {
+    major_celltype2 = sce_test$major_celltype_final
+  } else {
+    major_celltype2 = scReClassify_labels[[i-1]]
+  }
+  major_celltype2[idx] = cellTypes.reclassify_invivo_svm$final[idx]
+  names(major_celltype2) = colnames(sce_test)
+  scReClassify_combined_labels[[i]] = major_celltype2
+  
+  print(table(idx))
+  if (sum(idx)/length(idx) * 100 < 1) {
+    stop()
+  }
+  
+}
+```
+
+```{r}
+cty_cols = RColorBrewer::brewer.pal(12, "Paired")
+cty_cols = colorRampPalette(cty_cols)(length(unique(seu_invivo$major_celltype_final)))
+names(cty_cols) = unique(seu_invivo$major_celltype_final)
+
+seu_invivo$major_celltype_final_test = scReClassify_combined_labels[[1]]
+
+p1 = DimPlot(seu_invivo, reduction = "umap", group.by = "major_celltype_final_test", 
+             label = FALSE, cols = cty_cols, label.size = 6, repel = TRUE) + NoLegend() + ggtitle("Celltype")
+p2 = DimPlot(seu_invivo, reduction = "umap", group.by = "dataset", label = TRUE,
+             label.size = 6, repel = TRUE) + ggtitle("Dataset")
+p3 = DimPlot(seu_invivo, reduction = "umap", group.by = "timepoint2", label = TRUE,
+             label.size = 6, repel = TRUE) + ggtitle("Timepoint")
+
+p1 + p2 + p3
+
+### CHOOSE FINAL
+seu_invivo$major_celltype_final_scReClassify <- seu_invivo$major_celltype_final_test
+seu_invivo$major_celltype_final_test <- NULL
+```
+
+```{r}
+saveRDS(seu_invivo, file = "../EmbryoEikonDev/Data/230120_seu_invivo_withTE.RDS")
+```

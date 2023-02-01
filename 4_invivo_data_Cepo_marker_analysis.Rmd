@@ -1,0 +1,351 @@
+
+```{r}
+suppressPackageStartupMessages({
+  library(Cepo)
+  library(Seurat)
+  library(SingleCellExperiment)
+})
+
+seu_invivo = readRDS("../EmbryoEikonDev/Data/230120_seu_invivo_withTE.RDS")
+seu_invivo$treatment[is.na(seu_invivo$treatment)] = "NO"
+seu_invivo$treatment = toupper(seu_invivo$treatment)
+```
+
+```{r}
+reference = seu_invivo
+DefaultAssay(reference) <- "RNA"
+sce_reference = Seurat::as.SingleCellExperiment(reference)
+sce_reference$timepoint2[sce_reference$timepoint2 == 6 & sce_reference$major_celltype_final_scReClassify == "Primitive Endoderm" & sce_reference$dataset %in% c("GSE109555-trioseq")] = 5
+sce_reference$timepoint2[sce_reference$timepoint2 == 6 & sce_reference$major_celltype_final_scReClassify == "Primitive Endoderm" & sce_reference$dataset %in% c("GSE109555-allembyro")] = 9
+sce_reference$final_labels = paste0(sce_reference$major_celltype_final_scReClassify, "_E", 
+                                    sce_reference$timepoint2)
+
+batches = paste0(sce_reference$dataset)
+
+sceList = lapply(unique(batches), function(x) {
+  sce_reference[, batches == x]
+})
+names(sceList) = unique(batches)
+
+sapply(sceList, function(x) table(x$final_labels))
+
+cepoRes = lapply(sceList, function(x) {
+  
+  ctyLabels = paste0(x$major_celltype_final_scReClassify, "_E", x$timepoint2)
+  keep_cty = names(table(ctyLabels))[table(ctyLabels) > 5]
+  print(length(keep_cty))
+  if (length(keep_cty) >= 5) {
+    res = Cepo::Cepo(logcounts(x)[, ctyLabels %in% keep_cty],
+                     ctyLabels[ctyLabels %in% keep_cty],
+                     exprsPct = 0.05, minCells = 5)
+    return(res)
+  }
+  
+})
+names(cepoRes) = names(sceList)
+cepoRes = cepoRes[!sapply(cepoRes, is.null)]
+```
+
+```{r}
+geneIndex = Reduce(intersect, lapply(cepoRes, function(x) {
+  unique(unlist(Cepo::topGenes(x, n = 500)))
+}))
+length(geneIndex)
+
+counter <- 0
+cepoMat = do.call(cbind, lapply(cepoRes, function(x) {
+  counter <<- counter + 1
+  mat = x$stats[geneIndex,]
+  return(mat)
+}))
+
+cepoMat_sample = cepoMat
+cor.mat = cor(as.matrix(cepoMat))
+
+tmp = sapply(strsplit(colnames(cor.mat), "[.]"), "[[", 1)
+dataset=tmp
+pattern = paste0(paste(unique(tmp), collapse = ".|"), ".")
+cty_time = gsub(pattern, "", colnames(cor.mat))
+
+annot = data.frame(
+  dataset = dataset,
+  celltype = sapply(strsplit(cty_time, "_"), "[[", 1),
+  time = sapply(strsplit(cty_time, "_"), "[[", 2)
+)
+rownames(annot) = colnames(cor.mat)
+
+dataset_col = RColorBrewer::brewer.pal(length(unique(annot$dataset)), name = "Accent")
+names(dataset_col) = unique(annot$dataset)
+celltype_col = RColorBrewer::brewer.pal(length(unique(annot$celltype)), name = "Paired")
+names(celltype_col) = unique(annot$celltype)
+time_col = RColorBrewer::brewer.pal(length(unique(annot$time)), name = "Spectral")
+names(time_col) = paste0("E", c(3:12))
+
+annotColors = list(
+  dataset = dataset_col,
+  celltype = celltype_col,
+  time = time_col
+)
+
+#"ward.D", "ward.D2", "single", "complete", "average" (= UPGMA), "mcquitty" (= WPGMA), "median" (= WPGMC) or "centroid" (= UPGMC).
+pheatmap::pheatmap(cor.mat,
+                   annotation_col = annot,
+                   annotation_colors = annotColors,
+                   clustering_method = "ward.D",
+                   border_color = NA,
+                   show_rownames = FALSE,
+                   show_colnames = FALSE)
+```
+
+```{r}
+manyMarkers = lapply(all_cty, function(cty) {
+  res_all = lapply(cepoRes, function(x) {
+    if (any(colnames(x$stats) %in% cty)) {
+      res = Cepo::topGenes(x, n = 50)[[cty]]
+      res = res[res %in% topFeatures]
+      return(res)
+    }
+  })
+  markers = names(table(unlist(res_all)))[table(unlist(res_all)) == sum(!sapply(res_all, is.null))]
+  return(markers)
+})
+names(manyMarkers) <- all_cty
+manyMarkers
+#https://www.nature.com/articles/s41467-020-17575-w 
+sapply(manyMarkers, function(x) any(x %in% c("NR2F2"))) # marker of trophectoderm
+sapply(manyMarkers, function(x) any(x %in% c("CDX2"))) # marker of trophectoderm
+sapply(manyMarkers, function(x) any(x %in% c("IFI16"))) # marker of epiblast
+sapply(manyMarkers, function(x) any(x %in% c("GATA4"))) # marker of primitive endoderm
+sapply(manyMarkers, function(x) any(x %in% c("NANOG"))) # marker of epiblast
+sapply(manyMarkers, function(x) any(x %in% c("KLF17", "SUSD2", "PRDM14"))) # marker of blastocyst-epiblast
+sapply(manyMarkers, function(x) any(x %in% c("GATA6", "MSX2", "HNF4A"))) # marker of early blastocyst
+sapply(manyMarkers, function(x) any(x %in% c("HNF1B", "FOXA2", "GATA4", "RSPO3"))) # marker of hyhoblast
+sapply(manyMarkers, function(x) any(x %in% c("NODAL"))) # marker of hyhoblast
+sapply(manyMarkers, function(x) any(x %in% c("NANOG"))) # marker of hyhoblast
+```
+
+```{r}
+cty_cols = RColorBrewer::brewer.pal(12, "Paired")
+cty_cols = colorRampPalette(cty_cols)(length(unique(seu_invivo$major_celltype_final_scReClassify)))
+names(cty_cols) = unique(seu_invivo$major_celltype_final_scReClassify)
+
+time_cols = RColorBrewer::brewer.pal(8, "Spectral")
+time_cols = colorRampPalette(time_cols)(length(unique(seu_invivo$timepoint2)))
+names(time_cols) = as.character(c(3:12))
+
+p1 = DimPlot(seu_invivo, reduction = "umap", group.by = "major_celltype_final_scReClassify", label = TRUE, cols = cty_cols, label.size = 6, repel = TRUE) + ggtitle("Celltype")
+p2 = DimPlot(seu_invivo, reduction = "umap", group.by = "dataset", label = FALSE,
+             label.size = 6, repel = TRUE) + ggtitle("Dataset")
+p3 = DimPlot(seu_invivo, reduction = "umap", group.by = "timepoint2", label = TRUE,
+             cols = time_cols, 
+             label.size = 6, repel = TRUE) + ggtitle("Timepoint")+ NoLegend()
+p1 + p3
+```
+
+```{r}
+geneIndex = Reduce(intersect, lapply(cepoRes, function(x) {
+  unique(unlist(Cepo::topGenes(x, n = 1000)))
+}))
+length(geneIndex)
+
+counter <- 0
+cepoMat = do.call(cbind, lapply(cepoRes, function(x) {
+  counter <<- counter + 1
+  mat = x$stats[geneIndex,]
+  return(mat)
+}))
+
+
+group = colnames(cepoMat)
+group = gsub(paste0(paste(unique(sapply(strsplit(colnames(cepoMat), "[.]"), "[[", 1)), collapse = ".|"), "."), "", group)
+
+cepoMatAve = do.call(cbind, lapply(unique(group), function(x) {
+  
+  tmp = cepoMat[, group == x]
+  if (is.null(dim(tmp))) {
+    return(tmp)
+  } else {
+    return(rowMeans(as.matrix(tmp)))
+  }
+  
+}))
+colnames(cepoMatAve) = unique(group)
+```
+
+```{r}
+cepo_genes = lapply(1:ncol(cepoMatAve), function(x) {
+  names(sort(cepoMatAve[,x], decreasing = TRUE)[1:10])
+})
+names(cepo_genes) = colnames(cepoMatAve)
+
+topGenes = unlist(cepo_genes)
+names(topGenes) = rep(names(cepo_genes), sapply(cepo_genes, length))
+
+ggGenes <- lapply(names(sceList), function(dataset) {
+  
+  print(dataset)
+  sce = sceList[[dataset]]
+  
+  tryCatch({
+    
+    exprsMat = logcounts(sce)
+    countMat = counts(sce)
+    meta = colData(sce)
+    
+    keep_cty = names(table(meta$final_labels))[table(meta$final_labels) > 10]
+    exprsMat = exprsMat[, meta$final_labels %in% keep_cty]
+    countMat = countMat[, meta$final_labels %in% keep_cty]
+    meta = meta[meta$final_labels %in% keep_cty,]
+    
+    if (ncol(exprsMat) > 200) {
+      
+      geneExprs_batches <- lapply(1:length(topGenes), function(i) {
+        gene = topGenes[[i]]
+        celltype = names(topGenes)[[i]]
+        meta$gene <-exprsMat[gene, ]
+        meta$gene2 <-countMat[gene, ]
+        
+        if (dataset == "") {
+            threshold = quantile(meta$gene[meta$gene > 0], 0.5)
+        } else {
+            threshold = quantile(meta$gene, 0.5)
+        }
+        meta_cty <- meta %>% as.data.frame %>% group_by(final_labels) %>%
+          summarise(
+            meanExprs = sum(gene > threshold)/length(gene),
+            Zprop = sum(gene2 > 0)/length(gene2)
+          )
+        
+        meta_cty$dataset <- dataset
+        meta_cty$coi <- celltype
+        meta_cty$geneName <- paste0(celltype, "__", gene)
+  
+        
+      return(meta_cty)
+        
+      })
+      
+      geneExprs <- do.call(rbind, geneExprs_batches)
+      geneExprs <- geneExprs[order(geneExprs$final_labels, geneExprs$dataset),]
+      geneExprs$order <- paste0(geneExprs$final_labels, "_", geneExprs$dataset)
+      geneExprs$order <- factor(geneExprs$order, levels = unique(geneExprs$order))
+      
+      #ggplot(geneExprs, aes(x = final_labels, y = Zprop, col = final_labels)) +
+      #  geom_boxplot(show.legend = FALSE) + facet_wrap(~coi, ncol = 7) + 
+      #  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+         
+      return(geneExprs)
+      rm(exprsMat, countMat)
+      gc()
+    }
+  })
+  
+})
+
+ggGenes2 <- do.call(rbind, ggGenes[!sapply(ggGenes, is.null)])
+ggGenes2$geneName <- factor(ggGenes2$geneName, levels = sort(paste0(names(topGenes), "__", topGenes)))
+ggGenes2$order <- factor(as.character(ggGenes2$order), levels = sort(levels(ggGenes2$order)))
+
+library(RColorBrewer)
+p <- ggGenes2 %>%
+  ggplot(aes(x = order, y = geneName, fill = meanExprs)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = 'white', high = 'black') +  
+  #scale_fill_manual(values=rev(brewer.pal(7, "YlGnBu")), na.value="grey90")+    
+  #scale_fill_manual(values=c("#d53e4f", "#f46d43", "#fdae61", "#fee08b", "#e6f598", "#abdda4", "#ddf1da"), na.value = "grey90")+
+  #scale_fill_viridis_c(option = "A") + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90), axis.text.y = element_blank(), axis.ticks.y = element_blank())   
+p %>% ggsave(filename = "test_cepoMarkers_exprs2.pdf",
+             width = 20, height = 10)
+
+p <- ggGenes2 %>%
+  ggplot(aes(x = order, y = geneName, col = Zprop, size = meanExprs)) + 
+  geom_point() + 
+  #scale_fill_gradient2(low = 'white', high = 'black') +  
+  #scale_fill_manual(values=rev(brewer.pal(7, "YlGnBu")), na.value="grey90")+    
+  #scale_fill_manual(values=c("#d53e4f", "#f46d43", "#fdae61", "#fee08b", "#e6f598", "#abdda4", "#ddf1da"), na.value = "grey90")+
+  scale_color_viridis_c(option = "A") + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90), axis.text.y = element_blank(), axis.ticks.y = element_blank())   
+p %>% ggsave(filename = "test_cepoMarkers_exprs_count2.pdf",
+             width = 20, height = 10)
+
+```
+
+```{r}
+cepo_genes = list(
+  epi = c("NANOG", "SOX2", "TFAP2C", "ARGFX", "ETV4", "WNT5B", "NODAL"),
+  pe = c("FN1", "GATA6", "GATA4", "SOX17", "OTX2", "PDGFRA", "FOXA2", "COL4A1"),
+  te = c("GATA2", "GATA3", "TEAD3", "CDX2", "SLC12A3", "KRT7")
+)
+unlist(cepo_genes)[!unlist(cepo_genes) %in% rownames(seu_invivo@assays$RNA)]
+
+topGenes = unlist(cepo_genes)
+names(topGenes) = rep(names(cepo_genes), sapply(cepo_genes, length))
+
+ggGenes <- lapply(names(sceList), function(dataset) {
+  
+  print(dataset)
+  sce = sceList[[dataset]]
+
+  tryCatch({
+    
+    exprsMat = logcounts(sce)
+    meta = colData(sce)
+    
+    keep_cty = names(table(meta$final_labels))[table(meta$final_labels) > 5]
+    exprsMat = exprsMat[, meta$final_labels %in% keep_cty]
+    meta = meta[meta$final_labels %in% keep_cty,]
+    
+    if (ncol(exprsMat) > 200) {
+      
+      geneExprs_batches <- lapply(1:length(topGenes), function(i) {
+        gene = topGenes[[i]]
+        celltype = names(topGenes)[[i]]
+        meta$gene <-exprsMat[gene, ]
+        
+        if (dataset == "") {
+            threshold = quantile(meta$gene[meta$gene > 0], 0.5)
+        } else {
+            threshold = quantile(meta$gene[meta$gene > 0], 0.5)
+        }
+        meta_cty <- meta %>% as.data.frame %>% group_by(final_labels) %>%
+          summarise(
+            Zprop = sum(gene > threshold)/length(gene)
+          )
+        
+        meta_cty$dataset <- dataset
+        meta_cty$coi <- celltype
+        meta_cty$geneName <- paste0(celltype, "__", gene)
+        
+        return(meta_cty)
+        
+      })
+      
+      geneExprs <- do.call(rbind, geneExprs_batches)
+      geneExprs <- geneExprs[order(geneExprs$final_labels, geneExprs$dataset),]
+      geneExprs$order <- paste0(geneExprs$final_labels, "_", geneExprs$dataset)
+      geneExprs$order <- factor(geneExprs$order, levels = unique(geneExprs$order))
+      
+      return(geneExprs)
+      rm(exprsMat)
+      gc()
+    }
+  })
+  
+})
+
+ggGenes2 <- do.call(rbind, ggGenes[!sapply(ggGenes, is.null)])
+ggGenes2$geneName <- factor(ggGenes2$geneName, levels = sort(paste0(names(topGenes), "__", topGenes)))
+ggGenes2$order <- factor(as.character(ggGenes2$order), levels = sort(levels(ggGenes2$order)))
+
+p <- ggGenes2 %>%
+  ggplot(aes(x = order, y = geneName, fill = Zprop)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = 'white', high = 'black') +  
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90))   
+p %>% ggsave(filename = "test_cepoMarkers2.pdf",
+             width = 20, height = 10)
+```

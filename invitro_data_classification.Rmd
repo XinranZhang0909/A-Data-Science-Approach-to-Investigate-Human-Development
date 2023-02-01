@@ -1,0 +1,659 @@
+---
+title: "scClassify on in vitro protocols"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(DelayedMatrixStats)
+  library(Seurat)
+  library(ggplot2)
+  library(ggthemes)
+  library(scater)
+  library(scReClassify)
+  library(RColorBrewer)
+  library(dplyr)
+  library(scClassify)
+  library(parallel)
+})
+```
+
+# Load in vitro datasets and the in vivo reference
+```{r}
+seu_invivo = readRDS("../Data/230120_seu_invivo_withTE.RDS")
+```
+
+```{r}
+p = list.files("../Data/", pattern = "blastoid")
+blastoid1 = readRDS(paste0("../Data/", p[[1]]))
+blastoid2 = readRDS(paste0("../Data/", p[[2]]))
+blastoid3 = readRDS(paste0("../Data/", p[[3]]))
+blastoid4 = readRDS(paste0("../Data/", p[[4]]))
+blastoid5 = readRDS(paste0("../Data/", p[[5]]))
+
+sce_test_list = list(
+  blastoid1 = blastoid1,
+  blastoid2 = blastoid2,
+  blastoid3 = blastoid3,
+  blastoid4 = blastoid4,
+  blastoid5 = blastoid5
+)
+
+geneIdx = Reduce(intersect, lapply(sce_test_list, rownames))
+geneIdx = intersect(geneIdx, rownames(seu_invivo@assays$RNA@counts))
+length(geneIdx)
+
+sce_test_list = lapply(sce_test_list, function(x) {
+  sce = x[geneIdx,]
+  return(sce)
+})
+```
+
+```{r}
+propZero = lapply(sce_test_list, function(x) {
+  rowSums(counts(x) == 0)/ncol(x)
+})
+
+par(mfrow = c(1,5))
+for (i in 1:length(propZero)) {
+  hist(propZero[[i]], main = paste0("blastoid ", i))
+}
+
+propZero2 = lapply(sce_test_list, function(x) {
+  colSums(counts(x) == 0)/nrow(x)
+})
+
+par(mfrow = c(1,5))
+for (i in 1:length(propZero2)) {
+  hist(propZero2[[i]], main = paste0("blastoid ", i))
+}
+```
+
+#scClassify
+
+# Prepare in vivo references
+## invidual
+```{r}
+reference = seu_invivo
+DefaultAssay(reference) <- "RNA"
+sce_reference = Seurat::as.SingleCellExperiment(reference)
+sce_reference$final_labels = paste0(sce_reference$major_celltype_final_scReClassify, "_E", 
+                                    sce_reference$timepoint2)
+sce_2 = sce_reference[, sce_reference$dataset == "2"]
+sce_3 = sce_reference[, sce_reference$dataset == "3"]
+sce_3929 = sce_reference[, sce_reference$dataset == "E-MTAB-3929"]
+sce_9555 = sce_reference[, sce_reference$dataset == "GSE109555"]
+sce_6447 = sce_reference[, sce_reference$dataset == "GSE136447"]
+
+assay(sce_2, "integrated") = NULL
+assay(sce_3, "integrated") = NULL
+assay(sce_3929, "integrated") = NULL
+assay(sce_9555, "integrated") = NULL
+assay(sce_6447, "integrated") = NULL
+
+sce_train_list = list(
+  train1 = sce_2,
+  train2 = sce_3,
+  train3 = sce_3929,
+  train4 = sce_9555,
+  train5 = sce_6447
+)
+
+sce_train_list = lapply(sce_train_list, function(x) {
+  
+  ctyLabel = paste0(x$final_labels)
+  filter = names(table(ctyLabel))[table(ctyLabel) > 20]
+  x = x[, ctyLabel %in% filter]
+  return(x)
+  
+})
+
+cepoGenes = Reduce(intersect, lapply(sce_train_list, function(x) {
+  mat = logcounts(x)
+  celltype = x$final_labels
+  cepo = Cepo::Cepo(mat, celltype, exprsPct = 0.5)
+  return(rownames(cepo$stats))
+}))
+```
+
+# Classify cells using scClassify trained on multiple references
+### train datasets individually
+```{r}
+trainedClassifiersList = lapply(sce_train_list, function(x) {
+  
+  mat = logcounts(x)
+  celltype = x$final_labels
+
+  trained_classifier = train_scClassify(exprsMat_train = mat,
+                                        cellTypes_train = celltype,
+                                        selectFeatures = c("Cepo"),
+                                        topN = 100,
+                                        returnList = FALSE)
+  return(trained_classifier)
+  
+})
+
+trainJoint <- scClassifyTrainModelList(trainedClassifiersList[[1]], 
+                                       trainedClassifiersList[[2]],
+                                       trainedClassifiersList[[3]],
+                                       trainedClassifiersList[[4]],
+                                       trainedClassifiersList[[5]])
+```
+
+### classify data
+```{r}
+i_reps = 10
+counter <-  0
+
+invitro_classification_scclassify = lapply(sce_test_list, function(sce_test) {
+  
+  counter <<- counter + 1
+  
+  exprsMat_test <- logcounts(sce_test)[propZero[[counter]] < 0.5,]
+  print(nrow(exprsMat_test))
+  dataset = unique(sce_test$dataset)
+  
+  df_interactions = do.call(rbind, mclapply(1:i_reps, function(i) {
+    
+    print(i)
+    set.seed(i)
+    idx = sample(1:ncol(exprsMat_test), round(ncol(exprsMat_test)/10*8))
+    exprsMat_test_subset = exprsMat_test[,idx]
+    scClassify_res <- predict_scClassifyJoint(
+      exprsMat_test = exprsMat_test_subset,
+      cellTypes_test = c(1:ncol(exprsMat_test_subset)),
+      trainRes = trainJoint,
+      algorithm = "WKNN",
+      features = c("Cepo"),
+      similarity = c("pearson"),
+      verbose = FALSE,
+      prob_threshold = 0.5)
+    
+    df = data.frame(
+      cellID = colnames(exprsMat_test_subset),
+      predCelltype = scClassify_res$jointRes$cellTypes,
+      score = scClassify_res$jointRes$scores,
+      iteration = i,
+      protocol = dataset,
+      time = sce_test$timepoint[idx]
+    )
+    
+    return(df)
+    
+  }, mc.cores = i_reps))
+  return(df_interactions)
+  
+})
+```
+
+```{r}
+my_col = colorRampPalette(RColorBrewer::brewer.pal(12, name = "Paired"))
+my_col = my_col(length(unique(sce_reference$final_labels))+2)
+names(my_col)= c(unique(sce_reference$final_labels), "intermediate", "unassigned")
+```
+
+```{r}
+df1 = do.call(rbind,invitro_classification_scclassify)
+
+gBar1 <- df1 %>% 
+  ggplot(aes(y = protocol, fill = predCelltype)) +
+  geom_bar(position="fill") + 
+  scale_fill_manual(values = my_col) +
+  theme_linedraw()
+
+df2 = as.data.frame(cbind(sce_reference$dataset, sce_reference$final_labels))
+
+gBar2 <- df2 %>% 
+  ggplot(aes(y = sce_reference$dataset, fill = sce_reference$final_labels)) +
+  geom_bar(position="fill") + 
+  scale_fill_manual(values = my_col) +
+  theme_linedraw()
+
+gBar1+gBar2
+```
+
+```{r}
+dfList_scclassify = do.call(rbind, lapply(1:length(invitro_classification_scclassify), function(x) {
+  
+  res1 = invitro_classification_scclassify[[x]]
+  
+  param_grid = tidyr::expand_grid(c(1:10), c(1:10))
+  param_grid = param_grid[param_grid$`c(1:10)...1` != param_grid$`c(1:10)...2`, ]
+  
+  pairwise_ari = unlist(lapply(1:nrow(param_grid), function(i) {
+    
+    rep1 = param_grid[i,1][[1]]
+    rep2 = param_grid[i,2][[1]]
+    
+    res1_rep1 = res1[res1$iteration == rep1, ]
+    res1_rep2 = res1[res1$iteration == rep2, ]
+    
+    cellsIdx = intersect(res1_rep1$cellID, res1_rep2$cellID)
+    rownames(res1_rep1) = res1_rep1$cellID
+    rownames(res1_rep2) = res1_rep2$cellID
+    
+    res1_rep1_cty = res1_rep1[cellsIdx,"predCelltype"]
+    res1_rep2_cty = res1_rep2[cellsIdx,"predCelltype"]
+    
+    ari = mclust::adjustedRandIndex(res1_rep1_cty, res1_rep2_cty)
+    return(ari)
+    
+  }))
+  
+  df = data.frame(
+    sample = names(invitro_classification_scclassify)[[x]],
+    ari = pairwise_ari
+  )
+  return(df)
+  
+}))
+
+sapply(invitro_classification_scclassify, dim)
+
+dfList_scclassify %>%
+  ggplot(aes(x = reorder(sample, ari), y = ari, fill = sample)) + geom_boxplot()
+```
+
+
+
+
+
+
+#Seurat
+
+#prepare in vitro query
+```{r}
+convert_to_seurat <- function(sce, meta = TRUE, rpkm = FALSE, ...) {
+  drops <- rownames(sce)
+  if (meta) 
+    meta.data <- colData(sce)
+  else meta.data <- NULL
+  
+  if(any(toupper(names(assays(sce))) == "RPKM")) {
+    names(assays(sce_list_invivo[[1]])) <- toupper(names(assays(sce)))
+    counts <- assay(sce, "RPKM")[drops, ,drop = FALSE]
+  } else {
+    counts <- counts(sce)[drops, ,drop = FALSE]
+  }
+  seur <- Seurat::CreateSeuratObject(counts = counts, meta.data = as.data.frame(meta.data)) 
+  return(seur)
+}
+
+processData <- function(sce, 
+                        normalization.method = "LogNormalize",
+                        scale.fator = 10000,
+                        meta = TRUE) {
+  seu <- convert_to_seurat(sce, meta = meta)
+  seu <- NormalizeData(seu,normalization.method = normalization.method, scale.factor = scale.fator)
+  return(seu)
+}
+
+seu_test_list <- lapply(sce_test_list, processData)
+features_invitro <- SelectIntegrationFeatures(object.list = seu_test_list, nfeatures = 2000)
+geneIdx2 = Reduce(intersect, lapply(seu_test_list, rownames))
+length(geneIdx2)
+
+counter <- 0
+seu_test_list <- lapply(X = seu_test_list , FUN = function(x) {
+  counter <<- counter + 1
+  print(counter)
+  x$cellID <- colnames(x)
+  x <- x[geneIdx2, ]
+  x <- ScaleData(x, features = features_invitro, verbose = FALSE)
+  x <- RunPCA(x, features = features_invitro, verbose = FALSE, npcs = 50)
+  return(x)
+})
+
+seu_anchors_invitro <- FindIntegrationAnchors(object.list = seu_test_list, 
+                                             anchor.features = features_invitro, 
+                                             reduction = "rpca",
+                                             dims = 1:50,
+                                             k.anchor = 5)
+seu_integrated_invitro <- IntegrateData(anchorset = seu_anchors_invitro)
+DefaultAssay(seu_integrated_invitro) <- "integrated"
+seu_integrated_invitro <- ScaleData(seu_integrated_invitro, verbose = FALSE)
+seu_integrated_invitro <- RunPCA(seu_integrated_invitro, dims = 1:50, return.model = TRUE) 
+seu_integrated_invitro <- RunUMAP(seu_integrated_invitro, dims = 1:50, reduction = "pca", return.model = TRUE)
+```
+
+#query in vitro (integrated)
+
+```{r}
+seu_invivo$final_labels = paste0(seu_invivo$major_celltype_final_scReClassify, "_E", 
+                                    seu_invivo$timepoint2)
+seu_invivo <- RunPCA(seu_invivo, npcs = 50, ndims.print = 1:10, verbose = FALSE) 
+seu_invivo <- RunUMAP(seu_invivo, 
+                      reduction = "pca", 
+                      dims = 1:50,
+                      return.model=TRUE)
+
+
+seu_anchors_invivo <- FindTransferAnchors(reference = seu_invivo, 
+                                                 query = seu_integrated_invitro,
+    dims = 1:50, reference.reduction = "pca")
+predictions_invitro <- TransferData(anchorset = seu_anchors_invivo, 
+                                       refdata = seu_invivo$final_labels,
+    dims = 1:30)
+seu_integrated_invitro_query <-seu_integrated_invitro
+seu_integrated_invitro_query <- AddMetaData(seu_integrated_invitro_query, metadata = predictions_invitro)
+
+seu_integrated_invitro_query <- MapQuery(anchorset = seu_anchors_invivo, reference = seu_invivo, query = seu_integrated_invitro_query,
+    refdata = list(celltype = "final_labels"), reference.reduction = "pca", reduction.model = "umap")
+p1 <- DimPlot(seu_invivo, reduction = "umap", group.by = "final_labels", label = TRUE, label.size = 3,
+    repel = TRUE, cols = my_col) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_integrated_invitro_query, reduction = "ref.umap", group.by = "predicted.celltype", label = TRUE,
+    label.size = 3, repel = TRUE, cols = my_col) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+#sample
+```{r}
+i_reps = 10
+
+invitro_classification_seurat_integrated = do.call(rbind, lapply(1:i_reps, function(i) {
+    
+    print(i)
+    set.seed(i)
+    idx = sample(1:ncol(seu_integrated_invitro), round(ncol(seu_integrated_invitro)/10*8))
+    seu_integrated_invitro_subset = seu_integrated_invitro[,idx]
+    seu_anchors_invivo <- FindTransferAnchors(reference = seu_invivo, 
+                                                query = seu_integrated_invitro_subset,
+                                                dims = 1:50, reference.reduction = "pca")
+    predictions_invitro <- TransferData(anchorset = seu_anchors_invivo, 
+                                                refdata = seu_invivo$final_labels,
+                                                dims = 1:30)
+    
+    df = data.frame(
+      cellID = colnames(seu_integrated_invitro_subset),
+      predCelltype = predictions_invitro$predicted.id,
+      iteration = i,
+      protocol = seu_integrated_invitro_subset$dataset,
+      time = seu_integrated_invitro_subset$timepoint[idx]
+    )
+    
+    return(df)
+    
+}))
+
+invitro_classification_seurat_integrated_list = list(
+  blastoid1 = invitro_classification_seurat_integrated[invitro_classification_seurat_integrated$protocol == "GSE150578",],
+  blastoid2 = invitro_classification_seurat_integrated[invitro_classification_seurat_integrated$protocol == "GSE156596",],
+  blastoid3 = invitro_classification_seurat_integrated[invitro_classification_seurat_integrated$protocol == "GSE158971",],
+  blastoid4 = invitro_classification_seurat_integrated[invitro_classification_seurat_integrated$protocol == "GSE171820",],
+  blastoid5 = invitro_classification_seurat_integrated[invitro_classification_seurat_integrated$protocol == "GSE177689",]
+)
+
+dfList_seurat_integrated = do.call(rbind, lapply(1:length(invitro_classification_seurat_integrated_list), function(x) {
+  
+  res1 = invitro_classification_seurat_integrated_list[[x]]
+  
+  param_grid = tidyr::expand_grid(c(1:10), c(1:10))
+  param_grid = param_grid[param_grid$`c(1:10)...1` != param_grid$`c(1:10)...2`, ]
+  
+  pairwise_ari = unlist(lapply(1:nrow(param_grid), function(i) {
+    
+    rep1 = param_grid[i,1][[1]]
+    rep2 = param_grid[i,2][[1]]
+    
+    res1_rep1 = res1[res1$iteration == rep1, ]
+    res1_rep2 = res1[res1$iteration == rep2, ]
+    
+    cellsIdx = intersect(res1_rep1$cellID, res1_rep2$cellID)
+    rownames(res1_rep1) = res1_rep1$cellID
+    rownames(res1_rep2) = res1_rep2$cellID
+    
+    res1_rep1_cty = res1_rep1[cellsIdx,"predCelltype"]
+    res1_rep2_cty = res1_rep2[cellsIdx,"predCelltype"]
+    
+    ari = mclust::adjustedRandIndex(res1_rep1_cty, res1_rep2_cty)
+    return(ari)
+    
+  }))
+  
+  df = data.frame(
+    sample = names(invitro_classification_seurat_integrated_list)[[x]],
+    ari = pairwise_ari
+  )
+  return(df)
+  
+}))
+
+sapply(invitro_classification_seurat_integrated_list, dim)
+
+dfList_seurat_integrated %>%
+  ggplot(aes(x = reorder(sample, ari), y = ari, fill = sample)) + geom_boxplot()
+```
+
+
+
+#query in vitro (separately)
+
+```{r}
+seu_test_list = lapply(seu_test_list , function(x) {
+  x<- FindVariableFeatures(x, features = 2000)
+  x<- RunPCA(x, dims = 1:30, return.model = TRUE)
+  x<- RunUMAP(x, dims = 1:30, reduction = "pca", return.model = TRUE)
+  return(x)
+})
+```
+
+```{r}
+seu_anchors_invivo_ref1 <- FindTransferAnchors(reference = seu_invivo, 
+                                                 query = seu_test_list[[1]],
+                                                 dims = 1:50, reference.reduction = "pca")
+predictions1 <- TransferData(anchorset = seu_anchors_invivo_ref1, 
+                            refdata = seu_invivo$final_labels,
+                            dims = 1:30)
+seu_test_list[[1]] <- AddMetaData(seu_test_list[[1]], metadata = predictions1)
+
+seu_query_invitro1 <- MapQuery(anchorset = seu_anchors_invivo_ref1, 
+                              reference = seu_invivo, 
+                              query = seu_test_list[[1]],
+                              refdata = list(celltype = "final_labels"), 
+                              reference.reduction = "pca", 
+                              reduction.model = "umap")
+
+p1 <- DimPlot(seu_invivo,
+              reduction = "umap",
+              group.by = "final_labels", 
+              label = TRUE, 
+              label.size = 3,
+              repel = TRUE,
+              cols = my_col) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invitro1, reduction = "ref.umap", group.by = "predicted.id", label = TRUE, label.size = 3, repel = TRUE, cols = my_col) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+```{r}
+seu_anchors_invivo_ref2 <- FindTransferAnchors(reference = seu_invivo, 
+                                                 query = seu_test_list[[2]],
+                                                 dims = 1:50, reference.reduction = "pca")
+predictions2 <- TransferData(anchorset = seu_anchors_invivo_ref2, 
+                            refdata = seu_invivo$final_labels,
+                            dims = 1:30)
+seu_test_list[[2]] <- AddMetaData(seu_test_list[[2]], metadata = predictions2)
+
+seu_query_invitro2 <- MapQuery(anchorset = seu_anchors_invivo_ref2, 
+                              reference = seu_invivo, 
+                              query = seu_test_list[[2]],
+                              refdata = list(celltype = "final_labels"), 
+                              reference.reduction = "pca", 
+                              reduction.model = "umap")
+
+p1 <- DimPlot(seu_invivo,
+              reduction = "umap",
+              group.by = "final_labels", 
+              label = TRUE, 
+              label.size = 3,
+              repel = TRUE,
+              cols = my_col) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invitro2, reduction = "ref.umap", group.by = "predicted.id", label = TRUE, label.size = 3, repel = TRUE, cols = my_col) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+```{r}
+seu_anchors_invivo_ref3 <- FindTransferAnchors(reference = seu_invivo, 
+                                                 query = seu_test_list[[3]],
+                                                 dims = 1:50, reference.reduction = "pca")
+predictions3 <- TransferData(anchorset = seu_anchors_invivo_ref3, 
+                            refdata = seu_invivo$final_labels,
+                            dims = 1:30)
+seu_test_list[[3]] <- AddMetaData(seu_test_list[[3]], metadata = predictions3)
+
+seu_query_invitro3 <- MapQuery(anchorset = seu_anchors_invivo_ref3, 
+                              reference = seu_invivo, 
+                              query = seu_test_list[[3]],
+                              refdata = list(celltype = "final_labels"), 
+                              reference.reduction = "pca", 
+                              reduction.model = "umap")
+
+p1 <- DimPlot(seu_invivo,
+              reduction = "umap",
+              group.by = "final_labels", 
+              label = TRUE, 
+              label.size = 3,
+              repel = TRUE,
+              cols = my_col) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invitro3, reduction = "ref.umap", group.by = "predicted.id", label = TRUE, label.size = 3, repel = TRUE, cols = my_col) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+```{r}
+seu_anchors_invivo_ref4 <- FindTransferAnchors(reference = seu_invivo, 
+                                                 query = seu_test_list[[4]],
+                                                 dims = 1:50, reference.reduction = "pca")
+predictions4 <- TransferData(anchorset = seu_anchors_invivo_ref4, 
+                            refdata = seu_invivo$final_labels,
+                            dims = 1:30)
+seu_test_list[[4]] <- AddMetaData(seu_test_list[[4]], metadata = predictions4)
+
+seu_query_invitro4 <- MapQuery(anchorset = seu_anchors_invivo_ref4, 
+                              reference = seu_invivo, 
+                              query = seu_test_list[[4]],
+                              refdata = list(celltype = "final_labels"), 
+                              reference.reduction = "pca", 
+                              reduction.model = "umap")
+
+p1 <- DimPlot(seu_invivo,
+              reduction = "umap",
+              group.by = "final_labels", 
+              label = TRUE, 
+              label.size = 3,
+              repel = TRUE,
+              cols = my_col) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invitro4, reduction = "ref.umap", group.by = "predicted.id", label = TRUE, label.size = 3, repel = TRUE, cols = my_col) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+```{r}
+seu_anchors_invivo_ref5 <- FindTransferAnchors(reference = seu_invivo, 
+                                                 query = seu_test_list[[5]],
+                                                 dims = 1:50, reference.reduction = "pca")
+predictions5 <- TransferData(anchorset = seu_anchors_invivo_ref5, 
+                            refdata = seu_invivo$final_labels,
+                            dims = 1:30)
+seu_test_list[[5]] <- AddMetaData(seu_test_list[[5]], metadata = predictions5)
+
+seu_query_invitro5 <- MapQuery(anchorset = seu_anchors_invivo_ref5, 
+                              reference = seu_invivo, 
+                              query = seu_test_list[[5]],
+                              refdata = list(celltype = "final_labels"), 
+                              reference.reduction = "pca", 
+                              reduction.model = "umap")
+
+p1 <- DimPlot(seu_invivo,
+              reduction = "umap",
+              group.by = "final_labels", 
+              label = TRUE, 
+              label.size = 3,
+              repel = TRUE,
+              cols = my_col) + NoLegend() + ggtitle("Reference annotations")
+p2 <- DimPlot(seu_query_invitro5, reduction = "ref.umap", group.by = "predicted.id", label = TRUE, label.size = 3, repel = TRUE, cols = my_col) + NoLegend() + ggtitle("Query transferred labels")
+p1 + p2
+```
+
+#sample
+```{r}
+i_reps = 10
+counter <-  0
+
+invitro_classification_seurat_separately = lapply(seu_test_list, function(seu_test) {
+  
+  counter <<- counter + 1
+  
+  df_interactions = do.call(rbind, mclapply(1:i_reps, function(i) {
+    
+    print(i)
+    set.seed(i)
+    idx = sample(1:ncol(seu_test), round(ncol(seu_test)/10*8))
+    seu_test_subset = seu_test[,idx]
+    seu_anchors_invivo <- FindTransferAnchors(reference = seu_invivo, 
+                                                 query = seu_test_subset,
+                                                 dims = 1:50, reference.reduction = "pca")
+    predictions <- TransferData(anchorset = seu_anchors_invivo, 
+                                                  refdata = seu_invivo$final_labels,
+                                                  dims = 1:30)
+    
+    df = data.frame(
+      cellID = colnames(seu_test_subset),
+      predCelltype = predictions$predicted.id,
+      iteration = i,
+      protocol = seu_test_subset$dataset,
+      time = seu_test_subset$timepoint[idx]
+    )
+    
+    return(df)
+    
+  }, mc.cores = i_reps))
+  return(df_interactions)
+  
+})
+
+
+dfList_seurat_separately = do.call(rbind, lapply(1:length(invitro_classification_seurat_separately), function(x) {
+  
+  res1 = invitro_classification_seurat_separately[[x]]
+  
+  param_grid = tidyr::expand_grid(c(1:10), c(1:10))
+  param_grid = param_grid[param_grid$`c(1:10)...1` != param_grid$`c(1:10)...2`, ]
+  
+  pairwise_ari = unlist(lapply(1:nrow(param_grid), function(i) {
+    
+    rep1 = param_grid[i,1][[1]]
+    rep2 = param_grid[i,2][[1]]
+    
+    res1_rep1 = res1[res1$iteration == rep1, ]
+    res1_rep2 = res1[res1$iteration == rep2, ]
+    
+    cellsIdx = intersect(res1_rep1$cellID, res1_rep2$cellID)
+    rownames(res1_rep1) = res1_rep1$cellID
+    rownames(res1_rep2) = res1_rep2$cellID
+    
+    res1_rep1_cty = res1_rep1[cellsIdx,"predCelltype"]
+    res1_rep2_cty = res1_rep2[cellsIdx,"predCelltype"]
+    
+    ari = mclust::adjustedRandIndex(res1_rep1_cty, res1_rep2_cty)
+    return(ari)
+    
+  }))
+  
+  df = data.frame(
+    sample = names(invitro_classification_seurat_separately)[[x]],
+    ari = pairwise_ari
+  )
+  return(df)
+  
+}))
+
+sapply(invitro_classification_seurat_separately, dim)
+
+dfList_seurat_separately %>%
+  ggplot(aes(x = reorder(sample, ari), y = ari, fill = sample)) + geom_boxplot()
+```
+
+

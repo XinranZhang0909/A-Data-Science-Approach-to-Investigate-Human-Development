@@ -1,0 +1,91 @@
+---
+title: "GSE144897_gastruloid1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+  library(dplyr)
+  library(tidyverse)
+  library(Seurat)
+})
+```
+
+```{r}
+metadata = readRDS("../../Data/GSE144897/gast.all.minn.2021.rds")
+metadata = metadata@meta.data
+cellNames = sapply(strsplit(rownames(metadata), "_"), "[[", 1)
+
+sum(duplicated(cellNames))
+metadata = metadata[!duplicated(cellNames),]
+cellNames = cellNames[!duplicated(cellNames)]
+metadata
+```
+
+
+```{r}
+matrix_data <- Matrix::readMM("../../Data/GSE144897/GSM4300502_gastruloid1.matrix.mtx")
+
+gene_name = read.delim("../../Data/GSE144897/GSM4300502_gastruloid1.genes.tsv", sep = "\t", row.names = 1, header = FALSE)
+
+barcodes = read.delim("../../Data/GSE144897/GSM4300502_gastruloid1.barcodes.tsv", sep = "\t",header = FALSE)
+
+row.names(matrix_data)=gene_name$V2
+colnames(matrix_data) = as.character(barcodes$V1)
+
+cell_idx = intersect(colnames(matrix_data), cellNames)
+meta1 = metadata[cell_idx,]
+matrix_data = matrix_data[, cell_idx]
+meta1
+metadata1 = data.frame(
+  embryoid = rownames(meta1),
+  timepoint = rep("44h", ncol(matrix_data)),
+  celltype= meta1$gast.id,
+  is_combined = NA,
+  type = rep("gastruloid", ncol(matrix_data)),
+  dataset = rep("GSE144897", ncol(matrix_data))
+)
+
+sce_1 = SingleCellExperiment::SingleCellExperiment(assay = list(counts = matrix_data),
+                                                 colData = metadata1)
+
+saveRDS(sce_1, file = "../Data/human_gastruloid_GSE144897_1.RDS")
+```
+
+```{r}
+matrix_data_2 <- Matrix::readMM("../../Data/GSE144897/GSM4300503_gastruloid2.matrix.mtx")
+
+gene_name_2 = read.delim("../../Data/GSE144897/GSM4300503_gastruloid2.genes.tsv", sep = "\t", row.names = 1, header = FALSE)
+
+barcodes_2 = read.delim("../../Data/GSE144897/GSM4300503_gastruloid2.barcodes.tsv", sep = "\t",header = FALSE)
+
+row.names(matrix_data_2)=gene_name_2$V2
+colnames(matrix_data_2) = as.character(barcodes_2$V1)
+
+cell_idx_2 = intersect(colnames(matrix_data_2), cellNames)
+meta2 = metadata[cell_idx_2,]
+matrix_data_2 = matrix_data_2[, cell_idx_2]
+meta2
+metadata2 = data.frame(
+  embryoid = rownames(meta2),
+  timepoint = rep("44h", ncol(matrix_data_2)),
+  celltype= meta2$gast.id,
+  is_combined = NA,
+  type = rep("gastruloid", ncol(matrix_data_2)),
+  dataset = rep("GSE144897", ncol(matrix_data_2))
+)
+
+
+sce_2 = SingleCellExperiment::SingleCellExperiment(assay = list(counts = matrix_data_2),
+                                                 colData = metadata2)
+
+saveRDS(sce_2, file = "../Data/human_gastruloid_GSE144897_2.RDS")
+```

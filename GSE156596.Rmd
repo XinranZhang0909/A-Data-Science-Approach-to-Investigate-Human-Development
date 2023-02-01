@@ -1,0 +1,87 @@
+---
+title: "GSE156596"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+  library(dplyr)
+  library(tidyverse)
+})
+```
+
+```{r}
+count = Matrix::readMM("../../Data/GSE156596/GSM4734573_iBlastoids_matrix.mtx")
+
+feature = read.table("../../Data/GSE156596/GSM4734573_iBlastoids_features.tsv", sep = '\t', header = FALSE)
+
+barcodes = read.table("../../Data/GSE156596/GSM4734573_iBlastoids_barcodes.tsv", sep = '\t', header = FALSE)
+
+geneID = feature$V2
+rownames(count)=geneID
+colnames(count)=barcodes$V1
+
+meta = data.frame(
+  cellname = barcodes$V1,
+  timepoint = NA,
+  celltype = NA,
+  treatment = NA,
+  batch = NA,
+  type = rep("blastoid", ncol(count)),
+  dataset = rep("GSE156596", ncol(count))
+)
+rownames(meta) = barcodes$V1
+
+sce = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count),
+                                                 colData = meta)
+```
+
+```{r}
+totalUMI <- colSums(counts(sce))
+#mitochondrial
+propMito <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce) > 0)
+propZero <- colSums(counts(sce) == 0)/nrow(sce)
+
+sce$nUMI <- totalUMI
+sce$nGene <- totalGene
+sce$propMT <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+sce$propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+
+dim(sce)
+propZeroGene <- rowSums(counts(sce) == 0)/ncol(sce)
+sce = sce[propZeroGene < 1, propZero < 1]
+
+#transforming the data
+sce = scater::logNormCounts(sce)
+sce = scater::runPCA(sce, scale = TRUE)
+sce = scater::runUMAP(sce, ncomponents = 5)
+plotUMAP(sce, colour_by = "nGene")
+
+saveRDS(sce, file = "../Data/human_blastoid_GSE156596.RDS")
+```
+
+```{r}
+df = cbind(colData(sce), reducedDim(sce, "PCA"))
+df <- as.data.frame(df)
+
+idx = colnames(df)[8:10]
+g <- lapply(idx, function(metric) {
+  df$metric <- as.numeric(df[, metric])
+  p <- df %>% ggplot(aes(x = PC1, y = PC2, col = metric)) +
+    geom_point() 
+  return(p)
+})
+patchwork::wrap_plots(g, ncol = 3)
+```
+
+

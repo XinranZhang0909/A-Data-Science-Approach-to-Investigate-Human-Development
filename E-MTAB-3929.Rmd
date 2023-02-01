@@ -1,0 +1,119 @@
+---
+title: "E-MTAB-3929"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+  library(dplyr)
+})
+```
+
+```{r}
+count = read.delim("../../Data/E-MTAB-3929/counts.txt", 
+                   sep = "\t", row.names = 1)
+rpkm = read.delim("../../Data/E-MTAB-3929/rpkm.txt", 
+                   sep = "\t", row.names = 1)
+annotation = read.delim("../../Data/E-MTAB-3929/E-MTAB-3929.sdrf.txt", 
+                   sep = "\t", row.names = 1)
+
+idx = which(annotation$Characteristics.phenotype. == "not applicable")
+count = count[,idx]
+rpkm = rpkm[,idx]
+annotation = annotation[idx,]
+
+cellNames = colnames(count)
+tmp = strsplit(cellNames, "[.]")
+
+timepoints = sapply(tmp, "[[", 1)
+label2 = sapply(tmp, "[[", 2)
+label2[!grepl("early|late", label2)] = NA
+label = paste0(timepoints, "_", label2)
+label = gsub("_NA", "", label)
+
+celltype = annotation$Characteristics.inferred.lineage.
+cty = annotation$Characteristics.inferred.trophectoderm.subpopulation.
+cty[grepl("not applicable",cty)] = NA
+celltype = paste0(celltype, "-", cty)
+celltype = gsub("_NA","",celltype)
+
+exvivo = rep("exvivo", ncol(count))
+treatment = paste0(exvivo, "_", annotation$Characteristics.treatment.)
+
+meta = data.frame(
+  cellname = cellNames,
+  timepoint = label,
+  celltype = celltype,
+  batch_batch = NA,
+  batch_embryo = NA,
+  batch_sex = NA,
+  batch_other = NA,
+  treatment = treatment,
+  type = rep("blastocyst", ncol(count)),
+  dataset = rep("E-MTAB-3929", ncol(count))
+)
+rownames(meta) = cellNames
+
+sum(duplicated(rownames(count)))
+count = count[!duplicated(rownames(count)),]
+sum(duplicated(colnames(count)))
+
+sce = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count, RPKM = rpkm),
+                                                 colData = meta)
+```
+
+# QC for cells
+```{r}
+totalUMI <- colSums(counts(sce))
+#mitochondrial
+propMito <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce) > 0)
+propZero <- colSums(counts(sce) == 0)/nrow(sce)
+
+sce$nUMI <- totalUMI
+sce$nGene <- totalGene
+sce$propMT <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+sce$propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+
+propZeroGene <- rowSums(counts(sce) == 0)/ncol(sce)
+sce = sce[propZeroGene < 1, propZero < 1]
+
+sce = scater::logNormCounts(sce)
+sce = scater::runPCA(sce, scale = TRUE)
+sce = scater::runUMAP(sce, ncomponents = 2)
+plotUMAP(sce, colour_by = "timepoint")
+
+saveRDS(sce, file = "../Data/human_embryo_E-MTAB-3929.RDS")
+```
+
+```{r}
+df = cbind(colData(sce), reducedDim(sce, "PCA"))
+df <- as.data.frame(df)
+
+idx = colnames(df)[8:10]
+g <- lapply(idx, function(metric) {
+  df$metric <- as.numeric(df[, metric])
+  p <- df %>% ggplot(aes(x = PC1, y = PC2, col = metric)) +
+    geom_point() 
+  return(p)
+})
+patchwork::wrap_plots(g, ncol = 3)
+```
+
+
+```{r}
+ggplot(df, aes(x = nGene, y = propMito, col = timepoint)) + 
+  geom_point()
+
+ggplot(df, aes(x = nGene, fill = timepoint, alpha = 0.9)) + 
+  geom_histogram(bins= 100) 
+```

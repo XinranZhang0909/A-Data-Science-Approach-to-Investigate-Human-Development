@@ -1,0 +1,191 @@
+---
+title: "GSE109555"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+  library(dplyr)
+})
+```
+
+```{r}
+count_AllEmbryo = read.delim("../../Data/GSE109555/GSE109555_All_Embryo_TPM.txt", 
+                   sep = "\t", row.names = 1)
+count_TrioSeq = read.delim("../../Data/GSE109555/GSE109555_TrioSeq_TPM.txt", 
+                   sep = "\t", row.names = 1)
+info_TrioSeq = read.delim("../../Data/GSE109555/GSE109555_TrioSeq_DataInfo.txt", 
+                   sep = "\t", row.names = 1)
+```
+
+```{r}
+cellnames_AllEmbryo = colnames(count_AllEmbryo)
+tmp = strsplit(cellnames_AllEmbryo, "_")
+tmp_idx = sapply(tmp, length)
+table(tmp_idx)
+
+# embryo
+embryo = sapply(1:length(tmp_idx), function(i) {
+  
+  if (tmp_idx[[i]] == 5) {
+    tmp[[i]][[tmp_idx[[i]]-2]]
+  } else if (tmp_idx[[i]] == 6) {
+    tmp[[i]][[tmp_idx[[i]]-2]]
+  } else {
+    tmp[[i]][[tmp_idx[[i]]-3]]
+  }
+})
+
+# batch
+batch = sapply(1:length(tmp_idx), function(i) {
+  
+  if (tmp_idx[[i]] == 5) {
+    tmp[[i]][[tmp_idx[[i]]-1]]
+  } else if (tmp_idx[[i]] == 6) {
+    tmp[[i]][[tmp_idx[[i]]-1]]
+  } else {
+    tmp[[i]][[tmp_idx[[i]]-2]]
+  }
+})
+
+# IVC
+IVC = sapply(1:length(tmp_idx), function(i) {
+  
+  if (tmp_idx[[i]] == 5) {
+    tmp[[i]][[tmp_idx[[i]]-3]]
+  } else if (tmp_idx[[i]] == 6) {
+    tmp[[i]][[tmp_idx[[i]]-3]]
+  } else {
+    tmp[[i]][[tmp_idx[[i]]-4]]
+  }
+})
+
+# day
+timepoint = sapply(1:length(tmp_idx), function(i) {
+  
+  if (tmp_idx[[i]] == 5) {
+    tmp[[i]][[tmp_idx[[i]]-4]]
+  } else if (tmp_idx[[i]] == 6) {
+    tmp[[i]][[tmp_idx[[i]]-4]]
+  } else {
+    tmp[[i]][[tmp_idx[[i]]-5]]
+  }
+})
+timepoint = gsub("D", "E", timepoint)
+
+# hm vs hv
+hm_hv = sapply(1:length(tmp_idx), function(i) {
+  
+  if (tmp_idx[[i]] == 5) {
+    NA
+  } else if (tmp_idx[[i]] == 6) {
+    tmp[[i]][[tmp_idx[[i]]-5]]
+  } else {
+    tmp[[i]][[tmp_idx[[i]]-6]]
+  }
+})
+
+other = paste0(IVC, "_", hm_hv)
+
+meta_AllEmbryo = data.frame(
+  cellname = cellnames_AllEmbryo,
+  timepoint = timepoint,
+  celltype = NA,
+  batch_batch = batch,
+  batch_embryo = embryo,
+  batch_sex = NA,
+  batch_other = other,
+  treatment = rep("exvivo", ncol(count_AllEmbryo)),
+  type = rep("embryo", ncol(count_AllEmbryo)),
+  dataset = rep("GSE109555", ncol(count_AllEmbryo))
+)
+rownames(meta_AllEmbryo) = cellnames_AllEmbryo
+
+sce_AllEmbryo = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count_AllEmbryo),colData = meta_AllEmbryo)
+
+totalUMI <- colSums(counts(sce_AllEmbryo))
+#mitochondrial
+propMito <- colSums(counts(sce_AllEmbryo)[grep("^MT", rownames(sce_AllEmbryo), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce_AllEmbryo)[grep("^RP", rownames(sce_AllEmbryo), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce_AllEmbryo) > 0)
+propZero <- colSums(counts(sce_AllEmbryo) == 0)/nrow(sce_AllEmbryo)
+
+sce_AllEmbryo$nUMI <- totalUMI
+sce_AllEmbryo$nGene <- totalGene
+sce_AllEmbryo$propMT <- colSums(counts(sce_AllEmbryo)[grep("^MT", rownames(sce_AllEmbryo), value = TRUE), ])/totalUMI
+sce_AllEmbryo$propRibo <- colSums(counts(sce_AllEmbryo)[grep("^RP", rownames(sce_AllEmbryo), value = TRUE), ])/totalUMI
+
+dim(sce_AllEmbryo)
+propZeroGene <- rowSums(counts(sce_AllEmbryo) == 0)/ncol(sce_AllEmbryo)
+sce_AllEmbryo = sce_AllEmbryo[propZeroGene < 1, propZero < 1]
+
+#transforming the data
+sce_AllEmbryo = scater::logNormCounts(sce_AllEmbryo)
+sce_AllEmbryo = scater::runPCA(sce_AllEmbryo, scale = TRUE)
+sce_AllEmbryo = scater::runUMAP(sce_AllEmbryo, ncomponents = 5)
+plotUMAP(sce_AllEmbryo, colour_by = "nGene")
+
+saveRDS(sce_AllEmbryo, file = "../Data/human_embryo_GSE109555_AllEmbryo.RDS")
+```
+
+```{r}
+cellnames_TrioSeq = colnames(count_TrioSeq)
+timepoint = info_TrioSeq$Day
+timepoint = gsub("D", "E", timepoint)
+celltype = info_TrioSeq$Lineage
+batch = info_TrioSeq$Batch
+embryo = info_TrioSeq$Embryo
+sex = info_TrioSeq$Sex
+IVC = info_TrioSeq$IVC
+hm_hv = info_TrioSeq$Original
+other = paste0(IVC, "_", hm_hv)
+
+meta_TrioSeq = data.frame(
+  cellname = cellnames_TrioSeq,
+  timepoint = timepoint,
+  celltype = celltype,
+  batch_batch = batch,
+  batch_embryo = embryo,
+  batch_sex = sex,
+  batch_other = other,
+  treatment = rep("exvivo", ncol(count_TrioSeq)),
+  type = rep("embryo", ncol(count_TrioSeq)),
+  dataset = rep("GSE109555", ncol(count_TrioSeq))
+)
+rownames(meta_TrioSeq) = cellnames_TrioSeq
+
+sce_TrioSeq = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count_TrioSeq),colData = meta_TrioSeq)
+
+totalUMI <- colSums(counts(sce_TrioSeq))
+#mitochondrial
+propMito <- colSums(counts(sce_TrioSeq)[grep("^MT", rownames(sce_TrioSeq), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce_TrioSeq)[grep("^RP", rownames(sce_TrioSeq), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce_TrioSeq) > 0)
+propZero <- colSums(counts(sce_TrioSeq) == 0)/nrow(sce_TrioSeq)
+
+sce_TrioSeq$nUMI <- totalUMI
+sce_TrioSeq$nGene <- totalGene
+sce_TrioSeq$propMT <- colSums(counts(sce_TrioSeq)[grep("^MT", rownames(sce_TrioSeq), value = TRUE), ])/totalUMI
+sce_TrioSeq$propRibo <- colSums(counts(sce_TrioSeq)[grep("^RP", rownames(sce_TrioSeq), value = TRUE), ])/totalUMI
+
+dim(sce_TrioSeq)
+propZeroGene <- rowSums(counts(sce_TrioSeq) == 0)/ncol(sce_TrioSeq)
+sce_TrioSeq = sce_TrioSeq[propZeroGene < 1, propZero < 1]
+
+#transforming the data
+sce_TrioSeq = scater::logNormCounts(sce_TrioSeq)
+sce_TrioSeq = scater::runPCA(sce_TrioSeq, scale = TRUE)
+sce_TrioSeq = scater::runUMAP(sce_TrioSeq, ncomponents = 5)
+plotUMAP(sce_TrioSeq, colour_by = "nGene")
+
+saveRDS(sce_TrioSeq, file = "../Data/human_embryo_GSE109555_TrioSeq.RDS")
+```
+

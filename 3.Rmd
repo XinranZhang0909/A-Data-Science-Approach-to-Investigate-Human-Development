@@ -1,0 +1,82 @@
+---
+title: '3'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+})
+```
+
+```{r}
+#Read in data
+embryo.integrated=readRDS("../../Data/3/embryo_integrated_allembryos_filtered.Rdata")
+count_mat=embryo.integrated@assays$RNA@counts #This is the count matrix
+ 
+#Cell clusters 0 and 1 correspond to trophectoderm, 1 to epiblast and 2 to hypoblast.
+embryo.integrated@meta.data$Cell_Type[embryo.integrated@meta.data$seurat_clusters%in%c(0,1)]="TE"
+embryo.integrated@meta.data$Cell_Type[embryo.integrated@meta.data$seurat_clusters==2]="Epi"
+embryo.integrated@meta.data$Cell_Type[embryo.integrated@meta.data$seurat_clusters==3]="Hypo"
+
+embryo.integrated@meta.data$Age=11
+embryo.integrated@meta.data$Age[embryo.integrated@meta.data$orig.ident%in%paste0("embryo",c(1,2,7,12,14))]=9
+
+cellNames = colnames(embryo.integrated@assays$RNA@data)
+
+timepoints = paste0("E", embryo.integrated@meta.data$Age)
+
+meta = data.frame(
+  cellname = cellNames,
+  timepoint = timepoints,
+  celltype = embryo.integrated@meta.data$Cell_Type,
+  batch_batch = NA,
+  batch_embryo = embryo.integrated@meta.data$orig.ident,
+  batch_sex = NA,
+  batch_other = NA,
+  treatment = rep("exvivo", ncol(count_mat)),
+  type = rep("embryo", ncol(count_mat)),
+  dataset = rep("3", ncol(count_mat))
+)
+rownames(meta) = cellNames
+
+sce = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count_mat),
+                                                 colData = meta)
+
+totalUMI <- colSums(counts(sce))
+#mitochondrial
+propMito <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce) > 0)
+propZero <- colSums(counts(sce) == 0)/nrow(sce)
+
+sce$nUMI <- totalUMI
+sce$nGene <- totalGene
+sce$propMT <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+sce$propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+
+propZeroGene <- rowSums(counts(sce) == 0)/ncol(sce)
+sce = sce[propZeroGene < 1, propZero < 1]
+
+sce = scater::logNormCounts(sce)
+sce = scater::runPCA(sce, scale = TRUE)
+sce = scater::runUMAP(sce, ncomponents = 5)
+plotUMAP(sce, colour_by = "celltype")
+
+saveRDS(sce, file = "../Data/human_embryo_3.RDS")
+```
+
+```{r}
+tmp = embryo.integrated@reductions$tsne@cell.embeddings
+plot(tmp, col = embryo.integrated$batch)
+plot(tmp, col = as.factor(embryo.integrated$Cell_Type))
+```

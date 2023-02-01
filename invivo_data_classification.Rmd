@@ -1,0 +1,401 @@
+---
+title: "scClassify on in vitro protocols"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(DelayedMatrixStats)
+  library(Seurat)
+  library(ggplot2)
+  library(ggthemes)
+  library(scater)
+  library(scReClassify)
+  library(RColorBrewer)
+  library(dplyr)
+  library(scClassify)
+})
+```
+
+# Load in vivo reference
+```{r}
+setwd("~/Dropbox (Sydney Uni)/Hani/Supervision/Xinran/Hani")
+seu_invivo = readRDS("../EmbryoEikonDev/Data/230117_seu_invivo_withTE.RDS")
+```
+
+# Prepare in vivo references
+## invidual
+```{r}
+reference = seu_invivo
+DefaultAssay(reference) <- "integrated"
+sce_reference = Seurat::as.SingleCellExperiment(reference)
+sce_reference$final_labels = paste0(sce_reference$major_celltype_final_scReClassify, "_E", 
+                                    sce_reference$timepoint2)
+sce_2 = sce_reference[, sce_reference$dataset == "2"]
+sce_3 = sce_reference[, sce_reference$dataset == "3"]
+sce_3929 = sce_reference[, sce_reference$dataset == "E-MTAB-3929"]
+sce_6447 = sce_reference[, sce_reference$dataset == "GSE136447"]
+
+sce_train_list = list(
+  train1 = sce_2,
+  train2 = sce_3,
+  train3 = sce_3929,
+  train4 = sce_6447
+)
+
+sce_train_list = lapply(sce_train_list, function(x) {
+  
+  ctyLabel = paste0(x$final_labels)
+  filter = names(table(ctyLabel))[table(ctyLabel) > 10]
+  x = x[, ctyLabel %in% filter]
+  return(x)
+  
+})
+```
+
+### classify data
+```{r}
+i_reps = 3
+counter <-  0
+
+metadata = colnames(colData(sce_2))
+
+invitro_classification_integrated = lapply(1:length(sce_train_list), function(x) {
+  
+  counter <<- counter + 1
+  
+  sce_test = sce_train_list[[x]]
+  rna_test = altExp(sce_test, "RNA")
+  exprsMat_test <- logcounts(rna_test)
+  real_label <- sce_test$final_labels
+  print(nrow(exprsMat_test))
+  dataset = unique(sce_test$dataset)
+  
+  sce_train = scMerge::sce_cbind(sce_train_list[-x], exprs = "logcounts", colData_names = metadata)
+  exprsMat_train = logcounts(sce_train)
+  label_train = sce_train$final_labels
+  
+  df_interactions = do.call(rbind, lapply(1:i_reps, function(i) {
+    
+    print(i)
+    set.seed(i)
+    idx = sample(1:ncol(exprsMat_test), round(ncol(exprsMat_test)/10*8))
+    
+    #genes = intersect(rownames(exprsMat_test), rownames(exprsMat_train))
+    #print(length(genes))
+    
+    exprsMat_test_subset = exprsMat_test[,idx]
+    real_label_subset = real_label[idx]
+    
+    scClassify_res <- scClassify(
+      exprsMat_train = exprsMat_train,
+      cellTypes_train = label_train,
+      exprsMat_test = exprsMat_test_subset,
+      cellTypes_test = real_label_subset,
+      tree = "HOPACH",
+      algorithm = "WKNN",
+      selectFeatures = c("limma"),
+      similarity = c("pearson"), verbose = FALSE
+    )
+    
+    accuracy = sum(scClassify_res$testRes$test$pearson_WKNN_limma$predRes == real_label_subset)/length(real_label_subset)*100
+    
+    df = data.frame(
+      accuracy = accuracy,
+      rep = i,
+      method = "seurat",
+      test = dataset
+    )
+    return(df)
+    
+  }))
+  return(df_interactions)
+  
+})
+```
+
+# boxplot viz
+```{r}
+dftoplot = do.call(rbind, invitro_classification_integrated)
+
+ggplot(dftoplot, aes(x = test, y = accuracy, col =  test)) + 
+  geom_jitter()
+```
+
+# Prepare other normalised matrices
+```{r}
+reference = seu_invivo
+DefaultAssay(reference) <- "integrated"
+sce_reference = Seurat::as.SingleCellExperiment(reference)
+sce_reference$final_labels = paste0(sce_reference$major_celltype_final_scReClassify, "_E", 
+                                    sce_reference$timepoint2)
+
+cellIndex = c(colnames(sce_2), colnames(sce_3), colnames(sce_3929), colnames(sce_6447))
+sce_reference = sce_reference[, cellIndex]
+
+sce_reference$final_labels = paste0(sce_reference$major_celltype_final_scReClassify, "_E", 
+                                    sce_reference$timepoint2)
+sce_2 = sce_reference[, sce_reference$dataset == "2"]
+sce_3 = sce_reference[, sce_reference$dataset == "3"]
+sce_3929 = sce_reference[, sce_reference$dataset == "E-MTAB-3929"]
+sce_6447 = sce_reference[, sce_reference$dataset == "GSE136447"]
+```
+
+```{r}
+path = paste0("~/Dropbox (Sydney Uni)/Hani/Supervision/Xinran/Normalisation/230117_test_data/") 
+f = list.files(paste0(path, "normalised_matrix/"))
+
+get_normalised_matrices <- function(f_index) {
+  
+  print(f_index)
+  
+  path_rna_matrix = list.files(paste0(path, "normalised_matrix/", f_index), pattern = "rna_merged")
+  matrix = read.csv(paste0(path, "normalised_matrix/", f_index, "/", path_rna_matrix), row.names = 1)
+  
+  if (nrow(matrix) < ncol(matrix)) {
+    matrix = t(matrix)
+  } 
+  colnames(matrix) = cellIndex
+  return(matrix)
+  
+}
+
+mat1 = get_normalised_matrices(f[[1]]) #do not use ComBat 
+mat2 = get_normalised_matrices(f[[2]])
+mat3 = get_normalised_matrices(f[[3]])
+mat4 = get_normalised_matrices(f[[4]])
+mat5 = get_normalised_matrices(f[[5]])
+mat6 = get_normalised_matrices(f[[6]])
+
+rownames(mat2) = rownames(mat3) = rownames(mat4) = rownames(mat5) = rownames(mat6) = rownames(mat1)
+
+normalised_matrices = list(mat2,mat3,mat4,mat5,mat6)
+names(normalised_matrices) = f[-1]
+```
+
+```{r}
+sapply(normalised_matrices, function(x) grep("NANOG", rownames(x), value = TRUE))
+
+histList =lapply(1:length(normalised_matrices), function(x) {
+  
+  mat = normalised_matrices[[x]]
+  df = data.frame(
+    x = as.numeric(mat["NANOG",])
+  )
+  p = ggplot(df, aes(x = x)) + geom_histogram() + theme_classic() + ggtitle(names(normalised_matrices)[[x]])
+  return(p)
+  
+})
+patchwork::wrap_plots(histList, ncol = 5)
+```
+
+```{r}
+source("~/Dropbox (Sydney Uni)/Hani/Supervision/Xinran/Normalisation/Cepo2/Cepo2.R")
+
+countMat = counts(altExp(sce_reference, "RNA"))
+final_labels = sce_reference$final_labels
+filter = names(table(final_labels))[table(final_labels) > 20]
+idx = final_labels %in% filter
+
+cepo_res_list = lapply(1:length(normalised_matrices), function(i) {
+  mat = as.matrix(normalised_matrices[[i]])
+  cepo_res = Cepo2(mat[,idx], countMat[,idx], final_labels[idx])
+  return(cepo_res)
+})
+names(cepo_res_list) = names(normalised_matrices)
+```
+
+```{r}
+method = names(cepo_res_list)[[1]]
+
+geneIndex = unique(unlist(lapply(cepo_res_list[method], function(x) {
+  unique(unlist(Cepo::topGenes(x, n = 50)))
+})))
+length(geneIndex)
+
+geneIndex = intersect(geneIndex,rownames(cepoMat_sample))
+length(geneIndex)
+
+counter <- 0
+cepoMat = do.call(cbind, lapply(cepo_res_list[method], function(x) {
+  counter <<- counter + 1
+  mat = x$stats[geneIndex,]
+  #colnames(mat) = paste0(names(cepoRes)[[counter]], "__", colnames(mat))
+  return(mat)
+}))
+
+cor.mat = cor(as.matrix(cbind(cepoMat, cepoMat_sample[geneIndex,])))
+
+dataset = sapply(strsplit(colnames(cor.mat), "[.]"), "[[", 1)
+cty_time = gsub("dataset2.|dataset3.|dataset3929.|dataset6447.|Limma.|DeepMergeSingle.|Scanorama.|scGen.|Seurat.", "", colnames(cor.mat))
+
+annot = data.frame(
+  dataset = dataset,
+  celltype = sapply(strsplit(as.character(cty_time), "_"), "[[", 1),
+  time = sapply(strsplit(as.character(cty_time), "_"), "[[", 2)
+)
+rownames(annot) = colnames(cor.mat)
+
+annot$dataset[annot$dataset %in% c("dataset2", "dataset3", "dataset3929", "dataset6447")] = "bySample"
+
+dataset_col = RColorBrewer::brewer.pal(length(unique(annot$dataset)), name = "Paired")
+names(dataset_col) = unique(annot$dataset)
+celltype_col = RColorBrewer::brewer.pal(length(unique(annot$celltype)), name = "Paired")
+names(celltype_col) = unique(annot$celltype)
+time_col = RColorBrewer::brewer.pal(length(unique(annot$time)), name = "Spectral")
+names(time_col) = paste0("E", c(3:7,9,11))
+
+annotColors = list(
+  dataset = dataset_col,
+  celltype = celltype_col,
+  time = time_col
+)
+pheatmap::pheatmap(cor.mat,
+                   annotation_col = annot,
+                   annotation_colors = annotColors,
+                   show_rownames = FALSE,
+                   show_colnames = FALSE)
+```
+
+```{r}
+lapply(cepo_res_list, function(x) {
+  
+  geneIndex = unique(unlist(Cepo::topGenes(x, n = 50)))
+  mat = x$stats[geneIndex,]
+  cor.mat = cor(as.matrix(mat))
+  
+  annot = data.frame(
+    celltype = sapply(strsplit(as.character(colnames(cor.mat)), "_"), "[[", 1),
+    time = sapply(strsplit(as.character(colnames(cor.mat)), "_"), "[[", 2)
+  )
+  rownames(annot) = colnames(cor.mat)
+
+  celltype_col = RColorBrewer::brewer.pal(length(unique(annot$celltype)), name = "Paired")
+  names(celltype_col) = unique(annot$celltype)
+  time_col = RColorBrewer::brewer.pal(length(unique(annot$time)), name = "Spectral")
+  names(time_col) = paste0("E", c(3:7,9,11))
+  
+  annotColors = list(
+    celltype = celltype_col,
+    time = time_col
+  )
+  pheatmap::pheatmap(cor.mat,
+                     annotation_col = annot,
+                     annotation_colors = annotColors,
+                     show_rownames = FALSE,
+                     show_colnames = FALSE)
+  
+})
+```
+
+```{r}
+topCepo = Cepo::topGenes(cepo_res_list$DeepMergeSingle, n = 100)
+
+sapply(topCepo, function(x) any(x %in% c("NR2F2"))) # marker of trophectoderm
+sapply(topCepo, function(x) any(x %in% c("CDX2"))) # marker of trophectoderm
+sapply(topCepo, function(x) any(x %in% c("IFI16"))) # marker of epiblast
+sapply(topCepo, function(x) any(x %in% c("GATA4"))) # marker of primitive endoderm
+sapply(topCepo, function(x) any(x %in% c("NANOG"))) # marker of epiblast
+sapply(topCepo, function(x) any(x %in% c("KLF17", "SUSD2", "PRDM14"))) # marker of blastocyst-epiblast
+```
+
+
+### classify data
+```{r}
+finalAccuracy = lapply(names(normalised_matrices), function(method) {
+  
+  print(method)
+  normMat = normalised_matrices[[method]]
+  
+  sce1 = SingleCellExperiment(assay = list(counts = normMat[, sce_reference$dataset == "2"],
+                                           logcounts = normMat[, sce_reference$dataset == "2"]),
+                              colData = colData(sce_2))
+  altExp(sce1, "RNA") =  altExp(sce_2, "RNA")
+  
+  sce2 = SingleCellExperiment(assay = list(counts = normMat[, sce_reference$dataset == "3"],
+                                           logcounts = normMat[, sce_reference$dataset == "3"]),
+                              colData = colData(sce_3))
+  altExp(sce2, "RNA") =  altExp(sce_3, "RNA")
+  
+  sce3 = SingleCellExperiment(assay = list(counts = normMat[, sce_reference$dataset == "E-MTAB-3929"],
+                                           logcounts = normMat[, sce_reference$dataset == "E-MTAB-3929"]),
+                              colData = colData(sce_3929))
+  altExp(sce3, "RNA") =  altExp(sce_3929, "RNA")
+  
+  sce4 = SingleCellExperiment(assay = list(counts = normMat[, sce_reference$dataset == "GSE136447"],
+                                           logcounts = normMat[, sce_reference$dataset == "GSE136447"]),
+                              colData = colData(sce_6447))
+  altExp(sce4, "RNA") =  altExp(sce_6447, "RNA")
+  
+  sce_train_list = list(
+    train1 = sce1,
+    train2 = sce2,
+    train3 = sce3,
+    train4 = sce4
+  )
+  
+  i_reps = 5
+  counter <-  0
+  
+  metadata = colnames(colData(sce1))
+  
+  invivo2 = do.call(rbind, lapply(1:length(sce_train_list), function(x) {
+    
+    counter <<- counter + 1
+    
+    sce_test = sce_train_list[[x]]
+    rna_test = altExp(sce_test, "RNA")
+    exprsMat_test <- logcounts(rna_test)
+    real_label <- sce_test$final_labels
+    print(nrow(exprsMat_test))
+    dataset = unique(sce_test$dataset)
+    
+    exprsMat_train = normMat[, sce_reference$dataset != dataset]
+    label_train = sce_reference$final_labels[sce_reference$dataset != dataset]
+    
+    filter = names(table(label_train))[table(label_train) > 10]
+    exprsMat_train = exprsMat_train[, label_train %in% filter]
+    label_train = label_train[label_train %in% filter]
+    
+    df_interactions = do.call(rbind, lapply(1:i_reps, function(i) {
+      
+      print(i)
+      set.seed(i)
+      idx = sample(1:ncol(exprsMat_test), round(ncol(exprsMat_test)/10*8))
+      exprsMat_test_subset = exprsMat_test[,idx]
+      real_label_subset = real_label[idx]
+      
+      scClassify_res <- scClassify(
+        exprsMat_train = list(exprsMat_train),
+        cellTypes_train = list(label_train),
+        exprsMat_test = exprsMat_test_subset,
+        cellTypes_test = real_label_subset,
+        tree = "HOPACH",
+        algorithm = "WKNN",
+        selectFeatures = c("limma"),
+        similarity = c("pearson"), verbose = FALSE
+      )
+      
+      accuracy = sum(scClassify_res$testRes$Trained_by_TrainData_1$pearson_WKNN_limma$predRes == real_label_subset)/length(real_label_subset)*100
+      
+      df = data.frame(
+        accuracy = accuracy,
+        rep = i,
+        method = method,
+        test = dataset
+      )
+      return(df)
+      
+    }))
+    return(df_interactions)
+    
+  }))
+  return(invivo2)
+  
+})
+```

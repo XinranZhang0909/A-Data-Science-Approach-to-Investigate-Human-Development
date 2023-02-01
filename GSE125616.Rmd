@@ -1,0 +1,132 @@
+---
+title: "GSE125616"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(Matrix)
+  library(ggplot2)
+  library(dplyr)
+})
+```
+
+```{r}
+count = read.delim("../../Data/GSE125616/GSE125616_READ_COUNT_table_lvbo_TE_gencode.txt", 
+                   sep = "\t", header = FALSE)
+
+colnames(count) = count[2,]
+rownames(count) = count$Geneid
+count = count[-1,]
+count = count[-1,]
+count = count[,-c(1:6)]
+geneID = rownames(count)
+cellID = colnames(count)
+count = as.data.frame(lapply(count,as.numeric))
+rownames(count) = geneID
+colnames(count) = cellID
+```
+
+
+```{r}
+cellNames = colnames(count)
+cellNames = gsub(".fq.gz_STARAligned.out.bam", "", cellNames)
+cellNamesList = strsplit(cellNames, "_")
+
+cellNames2 = sapply(cellNamesList, "[[", 1)
+
+stage = c("6A", "6B", "6C", "7A", "7E", "7F", "7G", "C10A", "C10B", "C10C", "C13A", "C14A", "C14B", "C14C", "C7A", "C7B", "C7C", "C8A", "C8B", "C8C", "C9A", "C9B", "C9C", "ChEC")
+#stage = paste(stage, collapse = "|")
+cellNames3 = sapply(cellNames2, function(x) {
+
+  res = sapply(stage, function(y) {
+    if (grepl(y,x)) {
+      return(gsub(y, paste0(y, "__"), x))
+    }
+  })
+  
+  res = res[!sapply(res, is.null)][[1]]
+  return(res)
+  
+})
+cellNames4 = sapply(strsplit(cellNames3, "__"), "[[", 1)
+cellNames4 = sapply(strsplit(cellNames4, "-"), "[[", 1)
+
+cellNames5 = gsub("A", "", cellNames4)
+cellNames5 = gsub("B", "", cellNames5)
+cellNames5 = gsub("C", "", cellNames5)
+cellNames5 = gsub("E", "", cellNames5)
+cellNames5 = gsub("F", "", cellNames5)
+cellNames5 = gsub("G", "", cellNames5)
+cellNames5 = gsub("h", "hE", cellNames5)
+
+is_combined = c(rep("False", 69), rep("True", 550))
+
+meta = data.frame(
+  embryoid = cellNames,
+  timepoint = cellNames5,
+  celltype = NA,
+  is_combined = is_combined,
+  type = rep("embryoid", ncol(count)),
+  dataset = rep("GSE125616", ncol(count))
+)
+rownames(meta) = colnames(count)
+
+sce = SingleCellExperiment::SingleCellExperiment(assay = list(counts = count),
+                                                 colData = meta)
+
+```
+
+# QC for cells
+```{r}
+totalUMI <- colSums(counts(sce))
+#mitochondrial
+propMito <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+totalGene <- colSums(counts(sce) > 0)
+propZero <- colSums(counts(sce) == 0)/nrow(sce)
+
+sce$nUMI <- totalUMI
+sce$nGene <- totalGene
+sce$propMT <- colSums(counts(sce)[grep("^MT", rownames(sce), value = TRUE), ])/totalUMI
+sce$propRibo <- colSums(counts(sce)[grep("^RP", rownames(sce), value = TRUE), ])/totalUMI
+
+propZeroGene <- rowSums(counts(sce) == 0)/ncol(sce)
+sce = sce[propZeroGene < 1, propZero < 1]
+sce = scater::logNormCounts(sce)
+sce = scater::runPCA(sce, scale = TRUE)
+sce = scater::runUMAP(sce, ncomponents = 5)
+plotUMAP(sce, colour_by = "timepoint")
+
+saveRDS(sce, file = "../Data/human_embryoid_GSE125616.RDS")
+```
+
+```{r}
+df = cbind(colData(sce), reducedDim(sce, "PCA"))
+df <- as.data.frame(df)
+
+idx = colnames(df)[8:10]
+g <- lapply(idx, function(metric) {
+  df$metric <- as.numeric(df[, metric])
+  p <- df %>% ggplot(aes(x = PC1, y = PC2, col = metric)) +
+    geom_point() 
+  return(p)
+})
+patchwork::wrap_plots(g, ncol = 3)
+```
+
+```{r}
+ggplot(df, aes(x = nGene, y = propRibo, col = timepoint)) + 
+  geom_point()
+
+ggplot(df, aes(x = nGene, fill = timepoint, alpha = 0.9)) + 
+  geom_histogram(bins= 100) 
+```
+
+
